@@ -29,10 +29,16 @@ isolated file-IPC instance; Rust aggregates live instances and routes
 attachments back to their originating process. Its `connector_list` result
 reports `enumeration: "instance_registry"`; session file contents are never
 read. Both
-backends return an attachment-backed `session_id` and support
-`connector_exec`, `connector_exec_batch`, `connector_read_screen`,
-`connector_heartbeat`, `connector_interrupt`, `connector_acknowledge`, and
-`connector_close`. Neither backend is a native PTY. The unified list result
+The `connector_list` response distinguishes the native `id` (use it as
+`connector_open.target`) from the backend-qualified
+`session_id` (`securecrt/discovered/<id>` or `xshell/discovered/<id>`).
+A discovered `session_id` is valid for read-only `connector_get_status` and
+`connector_heartbeat`: both revalidate the exact native session, but do not
+create an attachment or renew an attachment lease. `connector_open` returns a
+different attachment-backed `session_id` required for commands and attachment
+lease renewal. It also supports `connector_exec_batch`, `connector_read_screen`,
+`connector_interrupt`, `connector_acknowledge`, and `connector_close`.
+Neither backend is a native PTY. The unified list result
 exposes discovery as `xshell_enumeration` and reports probe counts and
 per-name errors in `xshell_discovery`.
 

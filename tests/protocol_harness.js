@@ -70,7 +70,23 @@ async function run(binary) {
     assert.equal(list.tools.length, 17);
     assert(!("resultType" in list));
     await m.close();
-    for (const version of ["1900-01-01", "2025-06-18", "2026-07-28"]) {
+    // Older clients must receive our oldest supported handshake protocol,
+    // without claiming that the requested revisions are actually supported.
+    for (const version of ["1900-01-01", "2024-11-05", "2025-06-18"]) {
+      m = new MCP(binary, f.env);
+      const r = await m.request("initialize", {
+        protocolVersion: version,
+        capabilities: {},
+        clientInfo: { name: "legacy", version: "1" },
+      });
+      assert.equal(r.result.protocolVersion, "2025-11-25");
+      m.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+      assert.equal((await m.request("tools/list")).result.tools.length, 17);
+      await m.close();
+    }
+    // Requests for newer unsupported revisions and modern-era initialize
+    // remain errors; the modern per-request negotiation is unaffected.
+    for (const version of ["2025-12-01", "2026-07-28", "2027-01-01"]) {
       m = new MCP(binary, f.env);
       const r = await m.request("initialize", {
         protocolVersion: version,

@@ -93,12 +93,18 @@ returned explicitly when an operation is not valid for a backend.
 
 ## Session identity
 
-Session handles are opaque and never use a tab index. The current format is
-`<backend>/<backend-owned-id>`, for example `securecrt/<attachment>` or
-`xshell/<attachment>`. Batch handles use the same namespace, such as
-`securecrt/<batch>` or `xshell/<batch>`, so status lookup cannot cross
-backends. Clients must persist returned handles only for the current MCP
-process and call `connector_list` again after a bridge restart.
+Session handles are opaque and never use a tab index. `connector_list` returns
+a native `id` for `connector_open.target` and a read-only
+`session_id` in the form `securecrt/discovered/<native-id>` or
+`xshell/discovered/<native-id>`. Status and heartbeat on discovered IDs
+revalidate the same connected native session, without binding or remote input;
+a heartbeat does **not** renew an attachment lease. `connector_open` explicitly
+creates a command-capable attachment with a separate `session_id`, such as
+`securecrt/<attachment>` or `xshell/<attachment>`. Batch handles
+use the same namespace (`securecrt/<batch>` or `xshell/<batch>`).
+Unknown, expired, or unqualified IDs never fall back to another session
+or backend. Persist handles only for the current MCP process and re-list
+after a bridge restart.
 
 `configured_endpoint`, `RemoteAddress`, or a saved session name is metadata for
 operator confirmation. None of them proves the identity of a nested SSH host.

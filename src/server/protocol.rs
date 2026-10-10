@@ -173,7 +173,10 @@ impl ServerHandler for SecureCrtServer {
                 None,
             ));
         }
-        if request.protocol_version != ProtocolVersion::V_2025_11_25 {
+        // Legacy clients may request a revision older than our minimum.
+        // Negotiate them up to 2025-11-25 rather than rejecting initialize;
+        // modern and unknown newer revisions retain their existing rejection.
+        if request.protocol_version.as_str() > ProtocolVersion::V_2025_11_25.as_str() {
             return Err(ErrorData::unsupported_protocol_version(
                 request.protocol_version,
                 SUPPORTED,

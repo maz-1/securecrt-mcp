@@ -136,6 +136,27 @@ async function run(binary) {
         a = new FileAdapter(ipc, secret.token);
         b = new FileAdapter(ipc, secret.token);
         m = await new MCP(binary, env).start();
+        const listed = await m.tool("connector_list");
+        const discovered = listed[backend].find(
+          (item) => item.id === a.instance + "/session/1",
+        );
+        assert(discovered, "instance A is absent from connector_list");
+        assert.equal(
+          discovered.session_id,
+          backend + "/discovered/" + a.instance + "/session/1",
+        );
+        const observed = await m.tool("connector_get_status", {
+          session_id: discovered.session_id,
+        });
+        const heartbeat = await m.tool("connector_heartbeat", {
+          session_id: discovered.session_id,
+        });
+        assert.equal(observed.backend, backend);
+        assert.equal(observed.attachment_bound, false);
+        assert.equal(heartbeat.attachment_lease_renewed, false);
+        assert.equal(a.fake.bindings.size, 0, "read-only observation attached");
+        assert.equal(b.fake.bindings.size, 0, "read-only observation attached in another instance");
+        assert.equal(a.fake.sent.length + b.fake.sent.length, 0);
         const sid = (
           await m.tool("connector_open", {
             backend,
@@ -168,6 +189,18 @@ async function run(binary) {
         const before = [...b.calls];
         await m.tool("connector_read_screen", { session_id: sid }, true);
         assert.deepEqual(b.calls, before, "offline route substituted");
+        for (const method of ["connector_get_status", "connector_heartbeat"]) {
+          const stale = await m.tool(
+            method,
+            { session_id: discovered.session_id },
+            true,
+          );
+          assert(
+            stale.error.message.includes("unavailable"),
+            "stale discovery was routed to a different instance",
+          );
+        }
+        assert.equal(b.fake.sent.length, 0, "stale status sent terminal input");
         console.log(
           "PASS: " +
             backend +

@@ -23,6 +23,45 @@ impl SecureCrtServer {
         }
         &self.engine
     }
+
+    // A discovered native session is not an attachment. Revalidate its
+    // identity on read-only status checks without sending terminal input.
+    async fn discovered_session_status(&self, session_id: &str) -> anyhow::Result<Value> {
+        let (backend, native_id, bridge) =
+            if let Some(id) = session_id.strip_prefix("securecrt/discovered/") {
+                ("securecrt", id, &self.engine.bridge)
+            } else if let Some(id) = session_id.strip_prefix("xshell/discovered/") {
+                let xshell = self
+                    .xshell
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Xshell bridge is unavailable"))?;
+                ("xshell", id, &xshell.bridge)
+            } else {
+                anyhow::bail!("not a discovered connector session");
+            };
+        anyhow::ensure!(!native_id.is_empty(), "missing discovered session identity");
+        let listing = bridge.call("list_sessions", json!({})).await?;
+        let sessions = listing["sessions"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("invalid bridge session listing"))?;
+        let session = sessions
+            .iter()
+            .find(|item| item["id"].as_str() == Some(native_id) && item["connected"] == true)
+            .ok_or_else(|| anyhow::anyhow!(
+                "discovered connector session is unavailable; call connector_list and connector_open again"
+            ))?;
+        Ok(json!({
+            "session_id": session_id,
+            "backend": backend,
+            "binding": "discovered",
+            "connected": true,
+            "attachment_bound": false,
+            "attachment_lease_renewed": false,
+            "open_required_for_commands": true,
+            "unresolved": session["unresolved"],
+            "lease_expires_ms": session["lease_expires_ms"]
+        }))
+    }
 }
 fn result(value: anyhow::Result<Value>) -> Result<String, McpError> {
     value
@@ -84,7 +123,16 @@ impl SecureCrtServer {
                             .into_iter()
                             .map(|mut session| {
                                 session["backend"] = json!("securecrt");
-                                session["session_id"] = session["id"].clone();
+                                // Preserve id as the native connector_open target,
+                                // but expose session_id as a read-only discovered ID.
+                                if let Some(id) = session["id"].as_str().map(str::to_owned) {
+                                    session["session_id"] =
+                                        json!(format!("securecrt/discovered/{id}"));
+                                } else if let Some(fields) = session.as_object_mut() {
+                                    fields.remove("session_id");
+                                }
+                                session["binding"] = json!("discovered");
+                                session["open_required_for_commands"] = json!(true);
                                 session["capabilities"] = securecrt_capabilities();
                                 session
                             })
@@ -111,6 +159,14 @@ impl SecureCrtServer {
                             if let Some(sessions) = response["xshell"].as_array_mut() {
                                 for session in sessions {
                                     session["backend"] = json!("xshell");
+                                    if let Some(id) = session["id"].as_str().map(str::to_owned) {
+                                        session["session_id"] =
+                                            json!(format!("xshell/discovered/{id}"));
+                                    } else if let Some(fields) = session.as_object_mut() {
+                                        fields.remove("session_id");
+                                    }
+                                    session["binding"] = json!("discovered");
+                                    session["open_required_for_commands"] = json!(true);
                                     session["capabilities"] = json!([
                                         "exec", "batch", "screen_read", "interrupt",
                                         "acknowledge", "reuse_authenticated_session",
@@ -393,7 +449,7 @@ impl SecureCrtServer {
     }
 
     #[tool(
-        description = "Get a connector session or command status. Provide exactly one session_id or command_id.",
+        description = "Get connector session or command status. Provide exactly one session_id or command_id. Listed sessions are observed read-only; connector_open creates a command-capable attachment.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn connector_get_status(
@@ -406,6 +462,11 @@ impl SecureCrtServer {
             )));
         }
         if let Some(session_id) = p.session_id.as_deref() {
+            if session_id.starts_with("securecrt/discovered/")
+                || session_id.starts_with("xshell/discovered/")
+            {
+                return result(self.discovered_session_status(session_id).await);
+            }
             if let Some(attachment) = session_id.strip_prefix("xshell/") {
                 let Some(xshell) = &self.xshell else {
                     return result(Err(anyhow::anyhow!("Xshell bridge is unavailable")));
@@ -419,18 +480,34 @@ impl SecureCrtServer {
             if let Some(attachment) = session_id.strip_prefix("securecrt/") {
                 return result(self.engine.attachment_status(attachment).await);
             }
+            if session_id.starts_with("openssh/") {
+                return result(
+                    self.engine
+                        .connectors
+                        .status(crate::connector::ConnectorSessionParams {
+                            session_id: session_id.to_owned(),
+                        })
+                        .await,
+                );
+            }
+            return result(Err(anyhow::anyhow!(
+                "unqualified session_id; use the backend-qualified session_id from connector_list or connector_open"
+            )));
         }
+        // The session branch above already returned, so this is a command
+        // lookup. Keep OpenSSH command status and native command routing intact.
+        let command_id = p
+            .command_id
+            .as_deref()
+            .expect("exactly one ID validated above");
         match self.engine.connectors.status_any(p.clone()).await {
             Ok(value) => result(Ok(value)),
-            Err(_) => result(match p.command_id {
-                Some(command_id) => {
-                    self.command_engine(&command_id)
-                        .await
-                        .status(&command_id)
-                        .await
-                }
-                None => Err(anyhow::anyhow!("SecureCRT status requires command_id")),
-            }),
+            Err(_) => result(
+                self.command_engine(command_id)
+                    .await
+                    .status(command_id)
+                    .await,
+            ),
         }
     }
 
@@ -573,13 +650,18 @@ impl SecureCrtServer {
     }
 
     #[tool(
-        description = "Renew a screen-backed connector lease or report a persistent connector session. No remote command is sent.",
+        description = "Renew a connector_open attachment lease, or check a connector_list session read-only without attaching. No remote command is sent.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn connector_heartbeat(
         &self,
         Parameters(p): Parameters<crate::connector::ConnectorHeartbeatParams>,
     ) -> Result<String, McpError> {
+        if p.session_id.starts_with("securecrt/discovered/")
+            || p.session_id.starts_with("xshell/discovered/")
+        {
+            return result(self.discovered_session_status(&p.session_id).await);
+        }
         if let Some(attachment) = p.session_id.strip_prefix("securecrt/") {
             return result(self.engine.attachment_heartbeat(attachment).await);
         }
@@ -588,6 +670,11 @@ impl SecureCrtServer {
                 return result(Err(anyhow::anyhow!("Xshell bridge is unavailable")));
             };
             return result(xshell.attachment_heartbeat(attachment).await);
+        }
+        if !p.session_id.starts_with("openssh/") {
+            return result(Err(anyhow::anyhow!(
+                "unqualified session_id; use the backend-qualified session_id from connector_list or connector_open"
+            )));
         }
         result(
             self.engine

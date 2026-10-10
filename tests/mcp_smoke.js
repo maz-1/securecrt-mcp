@@ -68,6 +68,42 @@ async function run(binary) {
     const listed = await mcp.tool("connector_list");
     assert.equal(listed.securecrt.length, 2);
     assert.deepEqual(listed.openssh, []);
+    const discovered = listed.securecrt[0];
+    assert.equal(discovered.session_id, "securecrt/discovered/" + discovered.id);
+    assert.equal(discovered.binding, "discovered");
+    assert.equal(discovered.open_required_for_commands, true);
+    const bindingsBeforeChecks = bridge.bindings.size;
+    const discoveredStatus = await mcp.tool("connector_get_status", {
+      session_id: discovered.session_id,
+    });
+    assert.equal(discoveredStatus.session_id, discovered.session_id);
+    assert.equal(discoveredStatus.backend, "securecrt");
+    assert.equal(discoveredStatus.connected, true);
+    assert.equal(discoveredStatus.attachment_bound, false);
+    assert.equal(discoveredStatus.open_required_for_commands, true);
+    const discoveredHeartbeat = await mcp.tool("connector_heartbeat", {
+      session_id: discovered.session_id,
+    });
+    assert.equal(discoveredHeartbeat.attachment_lease_renewed, false);
+    assert.equal(discoveredHeartbeat.connected, true);
+    assert.equal(bridge.bindings.size, bindingsBeforeChecks, "status implicitly attached");
+    assert.equal(bridge.sent.length, 0, "read-only status sent terminal input");
+
+    for (const method of ["connector_get_status", "connector_heartbeat"]) {
+      const raw = await mcp.tool(method, { session_id: discovered.id }, true);
+      assert(raw.error.message.includes("unqualified session_id"));
+      const stale = await mcp.tool(
+        method,
+        { session_id: "securecrt/discovered/not-present" },
+        true,
+      );
+      assert(stale.error.message.includes("unavailable"));
+    }
+    for (const params of [{}, { session_id: discovered.session_id, command_id: "x" }]) {
+      const rejected = await mcp.tool("connector_get_status", params, true);
+      assert(rejected.error.message.includes("provide exactly one"));
+    }
+    assert.equal(bridge.sent.length, 0);
     let sid = (
       await mcp.tool("connector_open", {
         backend: "securecrt",
@@ -75,6 +111,14 @@ async function run(binary) {
         mode: "exec",
       })
     ).session_id;
+    assert.equal(
+      (await mcp.tool("connector_get_status", { session_id: sid })).backend,
+      "securecrt",
+    );
+    assert.equal(
+      (await mcp.tool("connector_heartbeat", { session_id: sid })).unresolved,
+      null,
+    );
     const exec = (command, extra = {}) =>
       mcp.tool("connector_exec", {
         session_id: sid,
