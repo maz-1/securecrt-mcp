@@ -31,6 +31,8 @@ Load one script per SecureCRT process for its connected tabs. Do not assume one 
 
 Install once. While the terminal and script remain open, rediscover sessions through your AI client. Closing the terminal stops the script; after your next login, load it again through the menu. A running MCP server does not imply a running terminal bridge. Keep the authenticated terminal open.
 
+To stop, first confirm that no command is running or unresolved, then open `stop-securecrt.cmd` or `stop-xshell.cmd` and confirm. A bridge supporting normal stop exits naturally and preserves SSH logins, avoiding SecureCRT's native `Script Cancelled` warning. With multiple online bridges, choose one by its terminal label and instance ID or enter `0` to cancel; stopping is never broadcast. CLI `--instance` also selects one explicitly. Older bridges require one idle native cancellation and reload to upgrade. Inspect an unknown stop outcome instead of automatically retrying.
+
 ## Claude or another MCP client only
 
 Run **`initialize-only.cmd` instead of `install.cmd`**. It does not write Codex configuration. Keep the extracted directory at a stable path and follow the [Claude guide](docs/clients/claude.en.md): absolute EXE path, `serve` argument and the same application directory reported by `paths`. Other clients also use stdio. Then load the terminal script, reload your client and verify as above. This route does not automatically configure all clients.
@@ -46,6 +48,6 @@ Run **`initialize-only.cmd` instead of `install.cmd`**. It does not write Codex 
 | Tools appear but the desired tab does not | Check connection state, application/window and actual bridge scope, then rediscover. |
 | Custom home cannot find the bridge | Launchers respect inherited `SECURECRT_MCP_HOME`; they do not reset it. Terminal and AI client must use the same directory. An already running terminal does not inherit later environment changes. See [application directory](docs/installation.en.md#2-choose-the-application-directory-and-client). |
 
-For upgrades, wait until the intended terminal is idle and previous work is resolved, stop the MCP client, and run the new package installer. Cancel the old terminal script (in SecureCRT, return to its original tab), load the new entry, then restart the client and check. Preserve configuration, tokens, logins and the old package. Updating files does not reload running bridges.
+For upgrades, wait until the intended terminal is idle and previous work is resolved, normally stop the bridge, stop the MCP client, and run the new package installer. Load the new entry, then restart the client and check. Only older bridges without normal stop need one native cancellation (in SecureCRT, return to the original launching tab). Preserve configuration, tokens, logins and the old package. Updating files does not reload running bridges.
 
 Share only versions, errors, exit codes and sanitized results when reporting issues, not tokens, server details, screen history or private configuration. See [Agent workflow](docs/agent-usage.en.md) for further usage.

@@ -3,7 +3,17 @@
 const fs = require("node:fs"),
   path = require("node:path"),
   crypto = require("node:crypto"),
-  { MCP, sleep, args, writeJSON, assert } = require("./node_harness");
+  { MCP, sleep, args, writeJSON, assert, hash } = require("./node_harness"),
+  { identityPreflight } = require("./desktop_matrix");
+async function lifecycleAdapterIdentity(binary, backend, target) {
+  const identities = await identityPreflight(binary, [backend], [backend + "=" + target]);
+  assert.equal(identities.length, 1, "lifecycle target must identify exactly one bridge");
+  const identity = identities[0],
+    source = identity.expected_sha256 === hash(path.join(__dirname, "../bridge/windows_bridge.js"))
+      ? "bridge/windows_bridge.js" : "bridge/securecrt_bridge.py";
+  assert.equal(identity.running_sha256, hash(path.join(__dirname, "..", source)));
+  return {adapter_source: source, adapter_sha256: identity.running_sha256};
+}
 const fingerprint = (item) =>
   Object.fromEntries(
     [
@@ -13,6 +23,7 @@ const fingerprint = (item) =>
       "protocol",
       "port",
       "session_name",
+      "tab_text",
       "remote_address",
       "remote_port",
       "user",
@@ -30,6 +41,8 @@ async function run(a) {
     receipt = {
       scope: "real MCP / native UI disconnect and reconnect / SSH",
       backend,
+      binary_sha256: hash(path.resolve(a._[0])),
+      adapter_sha256: null,
       checks: [],
       passed: false,
     };
@@ -46,6 +59,7 @@ async function run(a) {
     }
   }
   try {
+    Object.assign(receipt, await lifecycleAdapterIdentity(a._[0], backend, a.target));
     let targets = (await client.tool("connector_list"))[backend];
     const original = targets.find((x) => x.id === a.target && x.connected);
     assert(original, "explicit connected target missing");
@@ -70,13 +84,18 @@ async function run(a) {
       assert(Date.now() < until, "disconnected target still connected");
       await sleep(50);
     }
+    const rejectedMarker = "LIFECYCLE_MUST_NOT_SEND_" + crypto.randomUUID().replaceAll("-", "");
     async function rejectOld() {
       const r = await client.tool("connector_exec", {
         session_id: old,
-        command: "printf 'LIFECYCLE_MUST_NOT_SEND\\n'",
+        command: "printf '" + rejectedMarker + "\\n'",
         mode: "posix",
         wait_ms: 0,
       });
+      receipt.last_stale_rejection = Object.fromEntries(
+        ["sent", "state", "error_code", "requires_idle_ack", "automatic_retry"]
+          .filter((key) => key in r).map((key) => [key, r[key]]),
+      );
       assert(
         r.sent === false && r.state === "rejected",
         "old attachment did not fail before send",
@@ -146,4 +165,4 @@ if (require.main === module)
     console.error(e.message);
     process.exitCode = 1;
   });
-module.exports = { run };
+module.exports = { run, lifecycleAdapterIdentity };
