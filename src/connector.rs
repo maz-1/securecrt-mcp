@@ -84,7 +84,8 @@ pub struct ConnectorStatusParams {
 pub struct ConnectorAcknowledgeParams {
     pub session_id: String,
     pub confirmed_idle: bool,
-    /// Required by screen-backed connectors after a fresh screen inspection.
+    /// Single-use token from connector_read_screen for this session, valid for 30 seconds.
+    /// Any screen text or cursor change invalidates it, even if expected_prompt still matches.
     pub screen_token: Option<String>,
     pub expected_prompt: Option<String>,
 }
@@ -113,7 +114,10 @@ pub struct ConnectorHeartbeatParams {
 pub struct ConnectorExecParams {
     pub session_id: String,
     pub command: String,
-    /// Screen-backed capture mode. OpenSSH exec always uses its marker mode.
+    /// SecureCRT/Xshell default to posix for an inspected idle POSIX shell, tracking completion and exit code.
+    /// Non-POSIX input contexts require an explicit suitable mode such as prompt or snapshot.
+    /// Explicit snapshot leaves completion unknown and requires idle acknowledgement.
+    /// OpenSSH exec always uses its marker mode.
     pub mode: Option<CaptureMode>,
     pub expected_prompt: Option<String>,
     pub wait_for: Option<String>,

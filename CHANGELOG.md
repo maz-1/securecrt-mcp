@@ -14,6 +14,7 @@
 
 ## Unreleased
 
+- Default SecureCRT/Xshell `connector_exec` to POSIX completion tracking when `mode` is omitted, avoiding routine snapshot acknowledgements. Preserve explicit capture modes, low-level defaults and uncertainty recovery; non-POSIX contexts require an explicit suitable mode. Clarify single-use 30-second screen tokens and native stale-screen diagnostics.
 - Add self-contained Windows JScript entries for Xshell and SecureCRT, with embedded Rust executable, authenticated file IPC, native source identity and visible startup status; Python and pywin32 are not runtime requirements for these entries.
 - Preserve native Xshell transport on upgrade and refresh fixed native script entries without adding trial backup management.
 - Share desktop acceptance across Xshell and SecureCRT, measure twenty-command reuse and 2,500-line UTF-8 capture, and document separate Mac acceptance requirements.

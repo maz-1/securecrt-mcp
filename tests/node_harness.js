@@ -428,7 +428,7 @@ class FakeBridge {
               output +
               "\r\n" +
               end[0] +
-              " 0\r\n"
+              (v.text.includes("nonzero-exit") ? " 7\r\n" : " 0\r\n")
             : "ordinary output\nuser$",
         overflow: false,
         expired: false,

@@ -468,6 +468,68 @@ for (const backend of ["securecrt", "xshell"]) {
     },
   );
   check(
+    backend + ": acknowledgement explains stale tokens without clearing uncertainty",
+    () => {
+      for (const cause of ["expired", "reused", "wrong_session", "output", "cursor"]) {
+        const f = fixture(backend),
+          sessions = f.call("list_sessions").result.sessions,
+          sid = sessions[0].id;
+        f.adapter.unresolved[sid] = { session: sid, capture_id: "uncertain" };
+        const view = f.call("read_screen", { session: sid }).result;
+        const params = {
+          session: sid,
+          screen_token: view.screen_token,
+          expected_prompt: "user$",
+        };
+        if (cause === "expired") now += 30001;
+        if (cause === "reused") {
+          assert.equal(f.call("acknowledge_idle", params).ok, true);
+          f.adapter.unresolved[sid] = { session: sid, capture_id: "uncertain" };
+        }
+        if (cause === "wrong_session") {
+          params.screen_token = f.call("read_screen", {
+            session: sessions[1].id,
+          }).result.screen_token;
+        }
+        // The visible prompt is unchanged; a whole-screen token still becomes stale.
+        if (cause === "output") {
+          const row = backend === "xshell" ? 99 : 2;
+          f.screens.A.lines[row] = "background output";
+        }
+        if (cause === "cursor") f.screens.A.CurrentColumn++;
+        const rejected = f.call("acknowledge_idle", params);
+        assert.equal(rejected.ok, false, cause);
+        assert.equal(rejected.sent, false, cause);
+        assert.equal(rejected.error_code, "stale_screen", cause);
+        assert.match(
+          rejected.error,
+          cause === "expired" || cause === "reused"
+            ? /token.*(expired|used)/
+            : cause === "wrong_session"
+              ? /different session/
+              : /screen text or cursor changed/,
+          cause,
+        );
+        assert.ok(f.adapter.unresolved[sid], cause);
+        // A failed acknowledgement also consumes its token; restore the cursor
+        // only to allow a fresh, explicitly inspected acknowledgement below.
+        if (cause === "cursor") f.screens.A.CurrentColumn--;
+        const fresh = f.call("read_screen", { session: sid }).result;
+        assert.equal(
+          f.call("acknowledge_idle", {
+            session: sid,
+            screen_token: fresh.screen_token,
+            expected_prompt: "user$",
+          }).ok,
+          true,
+          cause,
+        );
+        assert.equal(f.adapter.unresolved[sid], undefined, cause);
+        assert.equal(f.state.sends.length, 0, cause);
+      }
+    },
+  );
+  check(
     backend +
       ": legacy fresh-screen begin is single use and does not leak attachments",
     () => {

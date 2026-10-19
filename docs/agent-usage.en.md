@@ -24,6 +24,8 @@ After binding, use `connector_read_screen` with the returned `session_id` to ins
 
 The values above are placeholders, not reusable live handles/operation IDs. Password prompts, menus, editors, database REPLs and pagers are not POSIX command boundaries. `running` / `starting` means query the original `command_id`, not resend. `wait_ms` is the current wait; `timeout_ms` is the capture budget, not permission to retry remote work.
 
+SecureCRT/Xshell `connector_exec` defaults to `posix` when `mode` is omitted: it targets an inspected idle POSIX shell, reports the exit code through completion markers, and needs no idle acknowledgement after normal completion. Non-POSIX input contexts such as appliance CLIs or REPLs require an explicit suitable mode such as `prompt` or `snapshot`; a prompt alone cannot establish the shell type. Explicit `snapshot` only captures the screen, leaves completion unknown and still requires explicit idle acknowledgement. The `mode="exec"` in `connector_open` selects the session type; each command can override its capture mode with `mode`.
+
 ## Interpret the receipt
 
 | Field | Meaning |
@@ -44,6 +46,8 @@ Within one MCP process, the same operation ID and semantics return the original 
 ## Stop and inspect uncertainty
 
 Inspect the original tab and confirm the original foreground command has ended. Only with explicit recovery authorization, get a fresh `connector_read_screen` token and use `connector_acknowledge` with `confirmed_idle=true`, `screen_token` and exact `expected_prompt`. Do not automatically declare idle. Rebind invalid attachments; historical timeout/unknown/cancelled states remain those outcomes.
+
+The screen token is bound to the original session, full screen text and cursor, expires after 30 seconds, and is consumed even by a failed acknowledgement. Background output, cursor movement or model reasoning/client approval taking longer than 30 seconds after the read can therefore cause `stale_screen` even when the prompt still matches. Acknowledge promptly after inspection. After expiry or a screen change, inspect again read-only and let the operator explicitly decide whether to acknowledge; never loop acknowledgements or replay commands automatically.
 
 There is no automatic acknowledgement, Ctrl+C, replay or backend switch. MCP disconnection drains already sent tasks within a bounded budget, without extra input or automatic remote termination. A one-shot CLI is not a long-term pagination cache; use the same MCP process or explicit daemon.
 

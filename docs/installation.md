@@ -132,4 +132,6 @@ doctor --backend openssh
 
 核验新二进制后，Codex 用户重新运行 `install`；仅用 Claude 的用户保留稳定二进制路径并运行 `upgrade`。`upgrade` 更新内嵌桥接入口，不写 Codex，也不替换单独安装的二进制。替换正在使用的二进制前先停止客户端。常规更新保留令牌和策略，不要使用 `init --force`。
 
+桌面 `connector_exec` 的默认捕获模式由 `snapshot` 改为 `posix`：省略 `mode` 的调用会使用 POSIX shell 完成标记，正常完成后不再逐次确认空闲。非 POSIX 目标和依赖旧快照行为的调用方应显式选择合适模式。底层捕获接口的默认值、显式模式和不确定结果恢复规则保持原样。
+
 替换磁盘文件不会重新加载运行中的脚本。在已授权的空闲边界取消旧脚本，加载固定入口，重启 MCP，运行 doctor 并重新发现/绑定目标。旧句柄失效。未决工作应先检查原 Tab，再考虑取消或恢复。见[排障](troubleshooting.md)和[桌面验收](desktop-acceptance.md)。

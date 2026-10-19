@@ -169,7 +169,6 @@ async function run(binary) {
         let v = await m.tool("connector_exec", {
           session_id: sid,
           command: "printf route-once",
-          mode: "posix",
           timeout_ms: 2000,
           wait_ms: 3000,
         });
@@ -177,6 +176,7 @@ async function run(binary) {
           v = await m.done(v.command_id);
         assert.equal(v.state, "completed");
         assert.equal(v.exit_code, 0);
+        assert.equal(v.requires_idle_ack, false);
         assert.equal(a.fake.sent.length, 1);
         assert.equal(b.fake.sent.length, 0);
         assert(a.calls.includes("poll_bulk") || a.calls.includes("poll"));

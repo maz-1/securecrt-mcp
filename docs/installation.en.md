@@ -122,4 +122,6 @@ Reload the AI client. Discover via `connector_list`, verify backend/title, bind 
 
 With a newly verified binary, Codex users rerun `install`; Claude-only users retain the stable binary path and run `upgrade`. `upgrade` refreshes embedded bridge entries without writing Codex; it does not replace a separately installed binary. Stop clients before replacing a binary in use. Ordinary updates preserve tokens and policy; do not use `init --force`.
 
+The desktop `connector_exec` default capture mode changes from `snapshot` to `posix`: calls omitting `mode` use POSIX shell completion markers and no longer need routine idle acknowledgement after normal completion. Non-POSIX targets and callers relying on the old snapshot behavior must explicitly select a suitable mode. Low-level capture defaults, explicit modes and uncertainty recovery remain unchanged.
+
 Replacing files does not reload running scripts. At an authorized idle boundary, cancel the old script, load the fixed entry, restart MCP, run doctor and discover/bind new targets. Old handles are invalid. For unresolved work, inspect the original tab before any cancellation or recovery. See [troubleshooting](troubleshooting.md) and [desktop acceptance](desktop-acceptance.md).

@@ -26,6 +26,8 @@ Mac 执行绑定会选择已核验的原生 Tab 并采样稳定上下文，不�
 
 上述值是占位符，不能作为可重复使用的真实句柄或 operation ID。密码提示、菜单、编辑器、数据库 REPL 和分页器都不是 POSIX 命令边界。`running` / `starting` 表示应查询原 `command_id`，不要重新发送。`wait_ms` 是本次等待时长；`timeout_ms` 是捕获预算，不是重试远端工作的许可。
 
+SecureCRT/Xshell 的 `connector_exec` 省略 `mode` 时默认使用 `posix`：面向已核实的空闲 POSIX shell，通过完成标记返回退出码，正常完成后无需确认空闲。设备 CLI、REPL 等非 POSIX 输入上下文必须显式选择合适模式，例如 `prompt` 或 `snapshot`，不能仅凭提示符判断 shell 类型。显式 `snapshot` 只捕获屏幕，不确认完成，仍要求显式确认空闲。`connector_open` 的 `mode="exec"` 选择会话类型；每次命令仍可用 `mode` 覆盖捕获模式。
+
 <a id="interpret-the-receipt"></a>
 
 ## 理解回执
@@ -50,6 +52,8 @@ Mac 执行绑定会选择已核验的原生 Tab 并采样稳定上下文，不�
 ## 遇到不确定结果时停止并检查
 
 检查原 Tab，确认原前台命令已结束。只有获得明确恢复授权后，才获取新的 `connector_read_screen` token，并用 `confirmed_idle=true`、`screen_token` 和精确的 `expected_prompt` 调用 `connector_acknowledge`。不要自动判定空闲。失效附件需要重新绑定；历史 timeout/unknown/cancelled 结果仍保持原状态。
+
+读屏 token 绑定原会话、全文屏幕和光标，只有 30 秒有效期，而且确认失败也会消耗它。即使提示符未变，后台输出、光标移动或读屏后模型思考/客户端审批耗时超过 30 秒，也会导致 `stale_screen`。恢复时应在检查之后及时发起确认；过期或屏幕变化后需要重新只读检查，再由操作者明确决定是否确认，不能自动循环确认或重放命令。
 
 不会自动确认空闲、发送 Ctrl+C、重放或切换后端。MCP 断开连接后，在有限预算内继续收尾已发送任务，不额外输入，也不自动终止远端工作。一次性 CLI 不是长期分页缓存；应使用同一 MCP 进程或显式 daemon。
 

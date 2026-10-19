@@ -123,20 +123,30 @@ async function run(binary) {
       mcp.tool("connector_exec", {
         session_id: sid,
         command,
-        mode: "posix",
         timeout_ms: 5000,
         wait_ms: 10000,
         ...extra,
       });
     const job = await exec("printf hello", { operation_id: "dedup" });
     assert.equal(job.state, "completed");
+    assert.equal(job.exit_code, 0);
+    assert.equal(job.requires_idle_ack, false);
     assert.equal(job.text, "hello\n");
     const count = bridge.sent.length;
     assert.equal(
-      (await exec("printf hello", { operation_id: "dedup" })).command_id,
+      (await exec("printf hello", { operation_id: "dedup", mode: "posix" }))
+        .command_id,
       job.command_id,
     );
     assert.equal(bridge.sent.length, count);
+    const nonzero = await exec("nonzero-exit");
+    assert.equal(nonzero.state, "completed");
+    assert.equal(nonzero.exit_code, 7);
+    assert.equal(nonzero.requires_idle_ack, false);
+    const subsequent = await exec("printf after-nonzero");
+    assert.equal(subsequent.state, "completed");
+    assert.equal(subsequent.requires_idle_ack, false);
+    const sentAfterDefaultCommands = bridge.sent.length;
     await mcp.tool(
       "connector_exec",
       {
@@ -147,11 +157,15 @@ async function run(binary) {
       },
       true,
     );
-    assert.equal(bridge.sent.length, count);
+    assert.equal(bridge.sent.length, sentAfterDefaultCommands);
     const policyDenied = await exec("systemctl restart test-only");
     assert.equal(policyDenied.state, "rejected");
     assert.equal(policyDenied.sent, false);
-    assert.equal(bridge.sent.length, count, "policy denial sent input");
+    assert.equal(
+      bridge.sent.length,
+      sentAfterDefaultCommands,
+      "policy denial sent input",
+    );
     for (const extra of [
       { timeout_ms: 0 },
       { max_bytes: 0 },
@@ -233,18 +247,23 @@ async function run(binary) {
     });
     assert.equal(prompt.state, "completed");
     assert.equal(prompt.exit_code, null);
-    const snap = await exec("printf snapshot", {
-      mode: "snapshot",
-      expected_prompt: "user$",
-    });
-    assert.equal(snap.state, "unknown");
-    assert(snap.requires_idle_ack);
-    await mcp.tool(
-      "connector_exec",
-      { session_id: sid, command: "printf blocked", mode: "posix" },
-      true,
-    );
-    await acknowledge();
+    // Explicit snapshot still leaves completion unknown and requires recovery.
+    {
+      const snap = await exec("printf snapshot", {
+        mode: "snapshot",
+        expected_prompt: "user$",
+      });
+      assert.equal(snap.state, "unknown");
+      assert.equal(snap.sent, true);
+      assert.match(snap.reason, /snapshot captured; command completion unknown/);
+      assert(snap.requires_idle_ack);
+      await mcp.tool(
+        "connector_exec",
+        { session_id: sid, command: "printf blocked", mode: "posix" },
+        true,
+      );
+      await acknowledge();
+    }
     bridge.protocol = 1;
     assert(
       (await mcp.tool("connector_list")).securecrt_error.includes("protocol"),

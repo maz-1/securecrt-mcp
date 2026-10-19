@@ -262,7 +262,7 @@ impl SecureCrtServer {
     }
 
     #[tool(
-        description = "Execute one command on a persistent OpenSSH exec session. The SSH handshake is reused; output is bounded and cursor-paginated. Unknown outcomes are never replayed.",
+        description = "Execute one command on a persistent connector session. SecureCRT/Xshell default to mode=posix for an inspected idle POSIX shell, tracking completion and exit code without idle acknowledgement after normal completion. For non-POSIX input contexts, explicitly select an appropriate mode such as prompt or snapshot. Explicit snapshot leaves completion unknown and requires idle acknowledgement. OpenSSH exec reuses its SSH handshake and marker mode. Output is bounded and cursor-paginated; unknown outcomes are never replayed.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -282,7 +282,7 @@ impl SecureCrtServer {
                     .exec(crate::terminal::ExecParams {
                         attachment_id: attachment.to_owned(),
                         command: p.command,
-                        mode: p.mode.unwrap_or_default(),
+                        mode: p.mode.unwrap_or(crate::model::CaptureMode::Posix),
                         expected_prompt: p.expected_prompt,
                         operation_id: p.operation_id,
                         timeout_ms: p.timeout_ms,
@@ -299,7 +299,7 @@ impl SecureCrtServer {
                     .exec(crate::terminal::ExecParams {
                         attachment_id: attachment.to_owned(),
                         command: p.command,
-                        mode: p.mode.unwrap_or_default(),
+                        mode: p.mode.unwrap_or(crate::model::CaptureMode::Posix),
                         expected_prompt: p.expected_prompt,
                         operation_id: p.operation_id,
                         timeout_ms: p.timeout_ms,
@@ -424,7 +424,7 @@ impl SecureCrtServer {
     }
 
     #[tool(
-        description = "Read the current screen context for a screen-backed connector session. Returns the fresh token required for a later acknowledgement or guarded command.",
+        description = "Read the current screen context for a screen-backed connector session. Returns a single-use token valid for 30 seconds for an explicit acknowledgement. Any screen text or cursor change invalidates it, even if the prompt still matches. Ordinary connector_exec uses its attachment rather than this token.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn connector_read_screen(
@@ -601,7 +601,7 @@ impl SecureCrtServer {
     }
 
     #[tool(
-        description = "Acknowledge that the operator inspected an unresolved connector session and confirmed its shell is idle. Screen-backed sessions require a fresh screen_token and exact expected_prompt. This does not prove remote termination.",
+        description = "Acknowledge that the operator inspected an unresolved connector session and confirmed its shell is idle. Screen-backed sessions require a single-use screen_token from connector_read_screen within 30 seconds, unchanged screen text/cursor, and exact expected_prompt. A failed attempt consumes the token too. Inspect again before a new explicit acknowledgement; never automatically acknowledge or replay commands. This does not prove remote termination.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,

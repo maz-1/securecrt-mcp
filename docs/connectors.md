@@ -42,6 +42,14 @@ Neither backend is a native PTY. The unified list result
 exposes discovery as `xshell_enumeration` and reports probe counts and
 per-name errors in `xshell_discovery`.
 
+For SecureCRT/Xshell, omitting `connector_exec.mode` defaults to `posix`:
+the caller must have inspected an idle POSIX shell. Completion markers provide
+the exit code and normal completion needs no idle acknowledgement. Non-POSIX
+input contexts require an explicit suitable mode such as `prompt` or `snapshot`.
+Explicit `snapshot` still leaves completion unknown and requires recovery.
+Timeouts, lost replies and unresolved work retain their inspection and explicit
+acknowledgement requirements; no command is retried automatically.
+
 ## OpenSSH command session
 
 Open an `exec` session with an OpenSSH Host alias or destination using

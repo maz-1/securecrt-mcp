@@ -27,7 +27,6 @@ async function run(binary) {
       m.tool("connector_exec", {
         session_id: sid,
         command,
-        mode: "posix",
         wait_ms: 10000,
         ...extra,
       });

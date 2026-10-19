@@ -436,7 +436,9 @@ McpWindowsAdapter.prototype.ack=function(p) {
     for(var k in this.captures) if(mcpOwn(this.captures,k) && this.captures[k].session==p.session) mcpFail("busy");
     this.ownership(p.session);var token=this.tokens[p.screen_token];delete this.tokens[p.screen_token];
     var view=this.readScreen(p.session),digest=mcpSha256(view.text+"\x00"+view.cursor_row+":"+view.cursor_column);
-    if(!token || token.session!=p.session || mcpNow()>token.expires || token.digest!=digest) mcpFail("stale_screen");
+    if(!token || mcpNow()>token.expires) mcpFail("stale_screen: screen token missing, expired (30 seconds), or already used; inspect a fresh read_screen before a new explicit acknowledgement; nothing sent");
+    if(token.session!=p.session) mcpFail("stale_screen: screen token belongs to a different session; inspect the original target; nothing sent");
+    if(token.digest!=digest) mcpFail("stale_screen: screen text or cursor changed since read_screen, even if the prompt matches; inspect again before a new explicit acknowledgement; nothing sent");
     if(view.current_line!=mcpTrim(p.expected_prompt)) mcpFail("prompt_mismatch");
     delete this.unresolved[p.session];
     for(k in this.attachments) if(mcpOwn(this.attachments,k)) {
