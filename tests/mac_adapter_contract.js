@@ -227,6 +227,21 @@ const nativeContract =
         self.adapter.acknowledge_idle(self.sid, screen['screen_token'], 'user$')
         self.assertFalse(self.adapter.unresolved)
 
+    def test_acknowledgement_cannot_use_an_attachment_as_a_screen_token(self):
+        attachment = self.adapter.attach(self.sid)
+        self.adapter.begin(**self.params()); self.adapter.end('op-1', False)
+        for prompt in ('user$', 'wrong$'):
+            with self.assertRaisesRegex(Exception, 'fresh full screen token'):
+                self.adapter.acknowledge_idle(self.sid, 'attachment:' + attachment['attachment_id'], prompt)
+            self.assertTrue(self.adapter.unresolved)
+        screen = self.adapter.read_screen(self.sid)
+        with self.assertRaisesRegex(Exception, 'prompt_mismatch'):
+            self.adapter.acknowledge_idle(self.sid, screen['screen_token'], 'wrong$')
+        self.assertTrue(self.adapter.unresolved)
+        screen = self.adapter.read_screen(self.sid)
+        self.adapter.acknowledge_idle(self.sid, screen['screen_token'], 'user$')
+        self.assertFalse(self.adapter.unresolved)
+
     def test_expired_wire_request_never_dispatches(self):
         req = dict(protocol_version=2, id='test', deadline_ms=self.time - 1,
                    token='a' * 64, method='begin', params=self.params())
@@ -557,11 +572,11 @@ class PromptRebaseTests(unittest.TestCase):
         self.ids = [s['id'] for s in self.a.list_sessions()['sessions']]
         self.sid = self.ids[0]
         self.binding = self.a.attach(self.sid, expected_prompt='user$')
-        self.elapsed = 0  # Redraw budgets below measure time after attachment.
         self.aid = self.binding['attachment_id']
         self.a.prepare_and_begin(attachment_id=self.aid, text='printf first',
                                  capture_id='first', runtime_ms=30000,
                                  completion_marker='END_owned')
+        self.elapsed = 0  # Redraw budgets measure time after the initial dispatch.
 
     def now(self):
         return 1000000 + self.elapsed
@@ -973,6 +988,26 @@ class NativeBindingActivationTests(unittest.TestCase):
         self.assertIn('owned',adapter.captures)
 
 class NativeDispatchActivationTests(unittest.TestCase):
+    def test_native_input_lane_is_pumped_after_queued_activation_before_send(self):
+        app=Crt();adapter=namespace['NativeAdapter'](app)
+        ids=[entry['id'] for entry in adapter.list_sessions()['sessions']]
+        target,other=app.tabs
+        binding=adapter.attach(ids[0],expected_prompt='user$')
+        app.focus=other
+        target.Activate=lambda:setattr(app,'pending_focus',target)
+        def pump(milliseconds):
+            self.assertEqual(milliseconds,10)
+            app.focus=app.pending_focus
+        app.Sleep=pump
+        original=target.Screen.Send
+        def send(text):
+            self.assertIs(app.focus,target,'Activate alone does not commit the native input lane')
+            original(text)
+        target.Screen.Send=send
+        adapter.prepare_and_begin(attachment_id=binding['attachment_id'],text='printf selected',capture_id='selected',runtime_ms=10000)
+        self.assertEqual(target.Screen.sent,['printf selected\r'])
+        self.assertFalse(other.Screen.sent)
+
     def test_each_dispatch_reselects_retained_target_after_another_binding(self):
         app=Crt();adapter=namespace['NativeAdapter'](app)
         ids=[entry['id'] for entry in adapter.list_sessions()['sessions']]
@@ -1289,9 +1324,12 @@ async function run() {
   return new Promise((resolve, reject) => {
     const proc = spawn(
       process.env.SECURECRT_TEST_PYTHON || "python3",
-      ["-c", nativeContract, ROOT],
-      { stdio: "inherit" },
+      ["-", ROOT],
+      { stdio: ["pipe", "inherit", "inherit"] },
     );
+    // Pipe the large fixture instead of exceeding Windows CreateProcess argv.
+    proc.stdin.on("error", reject);
+    proc.stdin.end(nativeContract);
     proc.on("error", reject);
     proc.on("exit", (code) =>
       code === 0
@@ -1334,6 +1372,9 @@ async function compiledNative(binary) {
     await new Promise((r) => free.close(r));
     const secret = readJSON(path.join(home, "bridge.json"));
     secret.port = port;
+    // This development fixture serves the Mac adapter over TCP even when
+    // Windows initialization defaults to native file IPC.
+    secret.ipc_dir = null;
     writeJSON(path.join(home, "bridge.json"), secret);
     const cfg = path.join(home, "config.toml");
     fs.writeFileSync(
@@ -1342,9 +1383,11 @@ async function compiledNative(binary) {
     );
     worker = spawn(
       process.env.SECURECRT_TEST_PYTHON || "python3",
-      ["-c", nativeWorker, ROOT, home],
-      { stdio: ["ignore", "ignore", "pipe"], env },
+      ["-", ROOT, home],
+      { stdio: ["pipe", "ignore", "pipe"], env },
     );
+    worker.stdin.on("error", () => {});
+    worker.stdin.end(nativeWorker);
     let errors = "";
     worker.stderr.on("data", (b) => (errors += b));
     const until = Date.now() + 5000;
@@ -1422,7 +1465,7 @@ async function compiledNative(binary) {
         ...extra,
       });
     for (const cmd of ["hostname", "uptime", "pwd"]) {
-      const v = await exec(cmd);
+      const v = await exec(cmd,cmd==="uptime"?{prefer_native_log:true}:{});
       assert.equal(v.state, "completed");
       assert.equal(v.exit_code, 0);
       assert.equal(v.text, cmd + "-output\n");
@@ -1431,6 +1474,7 @@ async function compiledNative(binary) {
       session_id: sid,
       commands: ["hostname", "uptime", "df -h /"],
       operation_id: "native-readiness",
+      prefer_native_log: true,
     });
     while (batch.state === "running") {
       await sleep(10);

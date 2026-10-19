@@ -2,6 +2,8 @@
 
 [简体中文](installation.md) · [English](installation.en.md) · [文档地图](README.md) · [Agent 安装提示词](agent-setup.md#中文提示词) · [Codex](clients/codex.md) · [Claude](clients/claude.md)
 
+Windows 新用户优先阅读[从这里开始](../START-HERE.md)：0.5.7 包提供保留结果窗口的安装入口、路径查看与两个终端的独立检查入口。下面保留完整的来源、配置和升级说明。
+
 本页介绍**当前 main**，并不适用于每一个已发布的 ZIP。桌面桥接沿用终端已有登录；OpenSSH 是需要显式选择并另行授权的独立连接。
 
 <a id="1-select-and-verify-the-source"></a>
@@ -102,13 +104,15 @@ $env:SECURECRT_MCP_HOME = "C:\Tools\securecrt-mcp-home"
 
 使用初始化或 `paths` 打印的路径。Windows 当前包还可能带有自包含 `.js` 入口，可释放其配套 Rust 二进制；这与 `install` 写入 Codex 配置是不同步骤。
 
-目标终端空闲且已获准加载桥接时，选择 **Script → Run**，加载打印出的入口。SecureCRT 每个进程只需一个脚本，覆盖其中已连接的 Tab。重复启动会保留原实例；取消时回到最初启动脚本的 Tab，选择 **Script → Cancel**。取消会保留 SSH 登录，但不能证明远端工作已结束。Xshell 以实际原生发现/实例范围为准，不要假设覆盖所有窗口。
+目标终端空闲且已获准加载桥接时，选择 **Script → Run**，加载打印出的入口。SecureCRT 每个进程只需一个脚本，覆盖其中已连接的 Tab。重复启动会保留原实例。当前 Windows 桥接正常停止使用 `stop-securecrt.cmd` / `stop-xshell.cmd`，先确认没有运行中或未决命令，再选择明确实例；输入 `0` 取消选择。正常停止保留 SSH 登录。旧桥接或 macOS 原生取消须回到最初启动脚本的 Tab，选择 **Script → Cancel**；取消不能证明远端工作已结束。Xshell 以实际原生发现/实例范围为准，不要假设覆盖所有窗口。
 
 macOS SecureCRT 没有 Windows JScript/ActiveX 脚本接口。优先复用已有可加载的 Python 引擎。加载失败时，遵循已安装 SecureCRT 版本支持的 Python 版本/架构要求，安装官方运行时后重启 SecureCRT。无需 `pip`、pywin32 或全局 PATH 修改。能否加载仍由终端加载器决定；桥接在加载与 API/来源检查后不会额外施加任意 Python 版本上限。[厂商脚本平台](https://www.vandyke.com/products/securecrt/scripts.html) · [macOS 引擎加载](https://www.vandyke.com/support/tips/how-to-use-python-scripting-securecrt-on-macos.html)
 
 已测试版本与架构见[支持矩阵](support-matrix.md)。当前矩阵尚未验证 Linux 桌面 SecureCRT。源码构建需要 Rust 1.88+ 和链接器；Node 22 用于开发、测试与打包，Mac 适配器契约测试还使用 Python。这些要求与安装后的最终用户运行依赖不同。
 
 <a id="4-check-each-layer-separately"></a>
+
+Windows 的在线 `doctor` 逐实例返回 JSON 诊断；默认检查所有在线实例。指定 `doctor --backend securecrt --instance <UUID>`（或 `xshell`）只检查该实例，缺失目标直接失败且不会探测替代宿主。macOS TCP 桥接继续返回现有文本报告。
 
 ## 4. 分层验证
 
@@ -134,4 +138,20 @@ doctor --backend openssh
 
 桌面 `connector_exec` 的默认捕获模式由 `snapshot` 改为 `posix`：省略 `mode` 的调用会使用 POSIX shell 完成标记，正常完成后不再逐次确认空闲。非 POSIX 目标和依赖旧快照行为的调用方应显式选择合适模式。底层捕获接口的默认值、显式模式和不确定结果恢复规则保持原样。
 
-替换磁盘文件不会重新加载运行中的脚本。在已授权的空闲边界取消旧脚本，加载固定入口，重启 MCP，运行 doctor 并重新发现/绑定目标。旧句柄失效。未决工作应先检查原 Tab，再考虑取消或恢复。见[排障](troubleshooting.md)和[桌面验收](desktop-acceptance.md)。
+Windows `install` 遇到正在运行的二进制被锁定时，会按新二进制 SHA-256 并排安装，并仅将原 `securecrt` MCP 的 command 更新为新绝对路径，保留审批、工具限制和其他配置。正在运行的旧进程保持不动，重新加载客户端后才使用新程序；旧版本不会自动删除。Claude-only 不会自动迁移注册路径，需在核验后自行更新。
+
+替换磁盘文件不会重新加载运行中的脚本。在已授权的空闲边界正常停止当前 Windows 桥接（旧桥接或 macOS 通过原生菜单取消），加载固定入口，重启 MCP，运行 doctor 并重新发现/绑定目标。旧句柄失效。未决工作应先检查原 Tab，再考虑取消或恢复。见[排障](troubleshooting.md)和[桌面验收](desktop-acceptance.md)。
+
+## Windows 原生脚本取消与旧锁迁移
+
+新 Windows 桥接用短暂文件互斥和带代次的 owner 记录保护同一终端宿主，不在原生接收循环中持有锁文件。界面取消空闲脚本后可以重新加载；暂停但仍有捕获或未决工作时拒绝抢占。旧代次恢复运行后会在再次发送前检查 owner，失去所有权就停止，不清理新代次的终端状态。5 秒心跳宽限仅用于确认无捕获、无未决工作的空闲代次。
+
+某些旧 SecureCRT 引擎在界面 Cancel 后跳过脚本 finally，并保留旧 lease 文件句柄。只在已通过真实界面取消旧脚本、检查原测试标签页空闲且确认没有未决捕获后，才使用显式迁移：
+
+```powershell
+securecrt-mcp repair-native-host --host-pid VERIFIED_NATIVE_PID --previous-instance VERIFIED_OLD_INSTANCE --confirmed-script-stopped --confirmed-idle
+```
+
+参数必须来自原宿主的诊断，不猜测。修复只写有效期 60 秒、绑定旧代次/宿主/当前源码的迁移回执；在此期间通过实际界面加载安装入口。不会关闭旧文件句柄、终止终端或重新登录 SSH。活跃、未决、代次不符及链接路径都拒绝。升级文件本身不会重载运行中的原生脚本。
+
+owner 状态无法读取或写入时停止并要求检查原终端，不从损坏/缺失的记录推断空闲。锁文件只是短临界区，不能用清理 owner 文件来强行解除远端命令的不确定状态。

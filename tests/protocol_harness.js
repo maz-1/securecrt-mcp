@@ -20,7 +20,7 @@ async function run(binary) {
     assert.equal(d.result.ttlMs, 0);
     assert.equal(
       (await m.request("tools/list", { _meta: meta() })).result.tools.length,
-      17,
+      18,
     );
     for (const version of ["1900-01-01", "2025-06-18", "2027-01-01"]) {
       const r = await m.request("tools/list", { _meta: meta(version) });
@@ -52,7 +52,7 @@ async function run(binary) {
     );
     assert.equal(
       (await m.request("tools/list", { _meta: meta() })).result.tools.length,
-      17,
+      18,
     );
     const denied = await m.request("tools/call", {
       _meta: meta(),
@@ -67,7 +67,7 @@ async function run(binary) {
     await m.close();
     m = await new MCP(binary, f.env).start();
     const list = (await m.request("tools/list")).result;
-    assert.equal(list.tools.length, 17);
+    assert.equal(list.tools.length, 18);
     assert(!("resultType" in list));
     await m.close();
     // Older clients must receive our oldest supported handshake protocol,
@@ -81,7 +81,7 @@ async function run(binary) {
       });
       assert.equal(r.result.protocolVersion, "2025-11-25");
       m.send({ jsonrpc: "2.0", method: "notifications/initialized" });
-      assert.equal((await m.request("tools/list")).result.tools.length, 17);
+      assert.equal((await m.request("tools/list")).result.tools.length, 18);
       await m.close();
     }
     // Requests for newer unsupported revisions and modern-era initialize

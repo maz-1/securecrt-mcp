@@ -6,8 +6,14 @@ async function run(binary) {
   binary = path.resolve(binary);
   for (const name of [
     "windows_bridge_test.js",
+    "vendor_contract.js",
+    "windows_pty_smoke.js",
+    "native_stop_selection_smoke.js",
     "windows_driver_contract.js",
     "client_contract.js",
+    // Windows developers can run the optional WSL contract separately; CI must
+    // not require an installed Linux distribution on the Windows runner.
+    ...(process.platform === "win32" ? [] : ["script_transport_contract.js"]),
     "desktop_matrix_contract.js",
     "original_prompt_observer_contract.js",
     "protocol_harness.js",
@@ -20,6 +26,7 @@ async function run(binary) {
     "file_transport_fault_smoke.js",
     "daemon_smoke.js",
     "installation_env_smoke.js",
+    "windows_bundle_smoke.js",
   ]) {
     console.log("RUN: " + name);
     const result = await command(

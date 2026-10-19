@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 "use strict";
-const { isolation } = require("./desktop_matrix");
-const { assert, fixture, MCP } = require("./node_harness");
+const { isolation, selectedInstances, scopedReports } = require("./desktop_matrix");
+const { assert, fixture, MCP, hash, ROOT } = require("./node_harness");
+const { lifecycleAdapterIdentity } = require("./desktop_lifecycle_probe");
+const path = require("node:path");
+const fs = require("node:fs");
 class IsolationDouble {
   constructor(mode) {
     this.mode = mode;
@@ -73,6 +76,15 @@ class IsolationDouble {
   }
 }
 async function run() {
+  const one="11111111-1111-4111-8111-111111111111",two="22222222-2222-4222-8222-222222222222";
+  const selected=selectedInstances("xshell",["xshell="+one+"/session/1","xshell="+one+"/session/2","securecrt="+two+"/session/1"]);
+  assert.deepEqual([...selected],[one]);
+  assert.equal(selectedInstances("xshell",[]),null);
+  assert.throws(()=>selectedInstances("xshell",["xshell=unbound-target"]));
+  const selectedFailure={instance:one,validation_error:"source changed"};
+  assert.deepEqual(scopedReports([{instance:two,validation_error:"unrelated older host"},selectedFailure],selected),[selectedFailure]);
+  assert.throws(()=>scopedReports([{instance:two}],selected),/missing/);
+  console.log("PASS: explicit native scope excludes unrelated hosts but preserves selected failures and rejects missing instances");
   for (const mode of ["overlap", "sequential", "cross-talk"]) {
     const client = new IsolationDouble(mode);
     let watchdog;
@@ -136,6 +148,28 @@ module.exports = { run, compiledOverlap };
 async function compiledOverlap(binary) {
   const f = await fixture(binary, { persistent: true });
   try {
+    // This fixture deliberately uses the Python/TCP contract. Windows init
+    // normally writes a native JS entry; seed only this isolated fixture's
+    // diagnostic path with the embedded Python source it claims to load.
+    fs.copyFileSync(path.join(ROOT, "bridge/securecrt_bridge.py"), path.join(f.home,
+      process.platform === "win32" ? "securecrt-mcp-securecrt.js" : "securecrt_bridge.py"));
+    const previous = process.env.SECURECRT_MCP_HOME;
+    process.env.SECURECRT_MCP_HOME = f.home;
+    try {
+      const identity = await lifecycleAdapterIdentity(binary, "securecrt", "private-TCP-target");
+      assert.equal(identity.adapter_source, "bridge/securecrt_bridge.py");
+      assert.equal(identity.adapter_sha256, hash(path.join(ROOT, identity.adapter_source)));
+      assert.equal(f.bridge.sent.length, 0);
+      const originalPing = f.bridge.method.bind(f.bridge);
+      f.bridge.method = async (name, p) => name === "ping" ? {...await originalPing(name, p), adapter_sha256:"outdated-source"} : originalPing(name, p);
+      await assert.rejects(lifecycleAdapterIdentity(binary, "securecrt", "private-TCP-target"));
+      assert.equal(f.bridge.sent.length, 0);
+      f.bridge.method = originalPing;
+      console.log("PASS: compiled TCP/Mac lifecycle receipt uses verified Python source; stale source refuses before input");
+    } finally {
+      if (previous === undefined) delete process.env.SECURECRT_MCP_HOME;
+      else process.env.SECURECRT_MCP_HOME = previous;
+    }
     const original = f.bridge.method.bind(f.bridge);
     f.bridge.method = async (name, p) => {
       if (["begin", "prepare_and_begin"].includes(name)) {

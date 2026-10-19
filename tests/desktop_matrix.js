@@ -15,7 +15,35 @@ const fs = require("node:fs"),
     writeJSON,
     assert,
   } = require("./node_harness");
-async function identityPreflight(binary, backends) {
+function selectedInstances(backend, explicit) {
+  const targets = explicit.filter((target) => target.startsWith(backend + "="));
+  if (!targets.length) return null;
+  const instances = new Set(targets.map((target) => target.slice(backend.length + 1).split("/")[0]));
+  assert([...instances].every((id) => /^[a-f0-9-]{36}$/i.test(id)), "explicit native target must contain its instance identity");
+  return instances;
+}
+function scopedReports(reports, instances) {
+  if (!instances) return reports;
+  const selected = reports.filter((report) => instances.has(report.instance));
+  assert.equal(new Set(selected.map((report) => report.instance)).size, instances.size, "selected native instance missing from runtime report");
+  return selected;
+}
+async function runtimeProbe(binary, backend, explicit = []) {
+  const home = process.env.SECURECRT_MCP_HOME || path.join(os.homedir(), ".securecrt-mcp"),
+    config = readJSON(path.join(home, backend === "securecrt" ? "bridge.json" : "xshell_bridge.json")),
+    selected = config.ipc_dir ? selectedInstances(backend, explicit) : null;
+  if (!selected) return command(binary, ["doctor", "--backend", backend]);
+  const reports = [];
+  let code = 0;
+  for (const instance of selected) {
+    const probe = await command(binary, ["doctor", "--backend", backend, "--instance", instance]);
+    const result = JSON.parse(probe.stdout);
+    reports.push(...scopedReports(result.instances || [], new Set([instance])));
+    if (probe.code !== 0) code = probe.code;
+  }
+  return {code, stdout: JSON.stringify({backend, instances: reports})};
+}
+async function identityPreflight(binary, backends, explicit = []) {
   const home =
       process.env.SECURECRT_MCP_HOME ||
       path.join(os.homedir(), ".securecrt-mcp"),
@@ -27,6 +55,7 @@ async function identityPreflight(binary, backends) {
         backend === "securecrt" ? "bridge.json" : "xshell_bridge.json",
       ),
     );
+    const selected = config.ipc_dir ? selectedInstances(backend, explicit) : null;
     if (config.ipc_dir) {
       const expected = hash(path.join(ROOT, "bridge/windows_bridge.js")),
         instances = new Set();
@@ -34,6 +63,7 @@ async function identityPreflight(binary, backends) {
         const directory = path.join(config.ipc_dir, "instances");
         if (fs.existsSync(directory))
           for (const name of fs.readdirSync(directory)) {
+            if (selected && !selected.has(name)) continue;
             const dir = path.join(directory, name);
             try {
               if (
@@ -47,6 +77,7 @@ async function identityPreflight(binary, backends) {
         await sleep(30);
       }
       assert(instances.size, backend + ": no live native adapter");
+      if (selected) assert.equal(instances.size, selected.size, "selected native instance is not online");
       for (const directory of instances) {
         const id = crypto.randomUUID(),
           tmp = path.join(directory, id + ".tmp"),
@@ -90,12 +121,12 @@ async function identityPreflight(binary, backends) {
         );
       }
     }
-    const probe = await command(binary, ["doctor", "--backend", backend]);
+    const probe = await runtimeProbe(binary, backend, explicit);
     if (probe.code !== 0) {
       let supports = [],
         validationFailed = true;
       try {
-        if (backend === "securecrt") {
+        if (backend === "securecrt" && !config.ipc_dir) {
           supports = probe.stdout
             .split(/\r?\n/)
             .filter((x) => x.startsWith("support="))
@@ -105,8 +136,9 @@ async function identityPreflight(binary, backends) {
           );
         } else {
           const value = JSON.parse(probe.stdout);
-          supports = value.instances.map((x) => x.support || {});
-          validationFailed = value.instances.some(
+          const reports = scopedReports(value.instances, selected);
+          supports = reports.map((x) => x.support || {});
+          validationFailed = reports.some(
             (x) => x.validation_error || !x.runtime,
           );
         }
@@ -115,9 +147,9 @@ async function identityPreflight(binary, backends) {
         supports.length &&
         supports.every(
           (r) =>
-            r.tier === "unknown" &&
+            r.tier === "tier_2" || (r.tier === "unknown" &&
             r.reasons?.length === 1 &&
-            r.reasons[0] === "native_probe_incomplete_or_no_tab",
+            r.reasons[0] === "native_probe_incomplete_or_no_tab"),
         );
       assert(
         identities.some((x) => x.backend === backend) &&
@@ -125,6 +157,13 @@ async function identityPreflight(binary, backends) {
           !validationFailed,
         backend + ": runtime identity/support gate failed before SSH",
       );
+    }
+    if (!config.ipc_dir) {
+      const actual = probe.stdout.match(/"adapter_sha256"\s*:\s*"([a-f0-9]{64})"/),
+        expected = hash(path.join(ROOT, "bridge/securecrt_bridge.py"));
+      assert(actual, "TCP runtime report must contain its loaded adapter identity");
+      assert.equal(actual[1], expected, "running TCP adapter differs from repository source");
+      identities.push({backend, expected_sha256: expected, running_sha256: actual[1]});
     }
   }
   return identities;
@@ -184,6 +223,7 @@ async function isolation(
   backend,
   targets,
   createClient = async () => new MCP(binary).start(),
+  preferNativeLog = false,
 ) {
   const client = await createClient(),
     opened = [],
@@ -229,6 +269,7 @@ async function isolation(
             mode: "posix",
             wait_ms: 0,
             timeout_ms: 10000,
+            prefer_native_log:preferNativeLog,
           })
           .then((value) => ({ value, index }))
           .catch((error) => ({ error, index })),
@@ -337,7 +378,7 @@ async function run(a) {
       commit: rev.code === 0 ? rev.stdout.trim() : null,
       working_tree_modified: dirty.code === 0 ? !!dirty.stdout.trim() : null,
     };
-  const identities = await identityPreflight(binary, backends);
+  const identities = await identityPreflight(binary, backends, a.all_idle ? [] : explicit);
   writeJSON(path.join(dir, "identity-preflight.json"), identities);
   console.log("PASS: native source identity before SSH probes");
   const targets = await discover(binary, backends, a.all_idle, explicit);
@@ -374,6 +415,7 @@ async function run(a) {
                       "--output",
                       receipt,
                       ...(a.exercise_recovery ? ["--exercise-recovery"] : []),
+                      ...(a.prefer_native_log==="true"?["--prefer-native-log","true"]:[]),
                     ]
                   : [
                       path.join(ROOT, "tests/connector_acceptance.js"),
@@ -393,6 +435,7 @@ async function run(a) {
                       new Date().toISOString().slice(0, 10),
                       "--output",
                       receipt,
+                      ...(a.prefer_native_log==="true"?["--prefer-native-log","true"]:[]),
                     ];
             const before = Date.now();
             let value,
@@ -436,19 +479,32 @@ async function run(a) {
   }
   for (const b of backends) {
     const selected = passing.filter((x) => x.backend === b);
-    if (selected.length > 1) results.push(await isolation(binary, b, selected));
+    if (selected.length > 1) results.push(await isolation(binary, b, selected,undefined,a.prefer_native_log==="true"));
   }
   const runtime = {};
   for (const b of backends) {
-    const probe = await command(binary, ["doctor", "--backend", b]);
+    const probe = await runtimeProbe(binary, b, a.all_idle ? [] : explicit);
+    const nativeIPC = probe.stdout.trimStart().startsWith("{");
+    const selected = nativeIPC && !a.all_idle ? selectedInstances(b, explicit) : null;
+    let passed = probe.code === 0;
+    let selectedReports;
+    if (selected) {
+      try {
+        selectedReports = scopedReports(JSON.parse(probe.stdout).instances, selected);
+        passed = selectedReports.every((x) => x.runtime && !x.validation_error &&
+          ["tier_1", "tier_2"].includes(x.support?.tier) &&
+          x.runtime.adapter_sha256 === hash(path.join(ROOT,"bridge/windows_bridge.js")));
+      } catch { passed = false; }
+    }
     results.push({
       backend: b,
       phase: "runtime-and-source-identity",
-      passed: probe.code === 0,
+      passed,
+      scope: selected ? "explicit selected native instances" : nativeIPC ? "all online native instances" : "representative TCP bridge",
     });
     let native = [];
     try {
-      if (b === "securecrt") {
+      if (b === "securecrt" && !nativeIPC) {
         const raw = probe.stdout
           .replaceAll("\r\n", "\n")
           .split("bridge: OK\n")[1];
@@ -465,8 +521,7 @@ async function run(a) {
           }
         }
       } else
-        native = JSON.parse(probe.stdout)
-          .instances.filter((x) => x.runtime)
+        native = (selectedReports || JSON.parse(probe.stdout).instances).filter((x) => x.runtime)
           .map((x) => x.runtime);
     } catch {}
     runtime[b] = native.map((v) =>
@@ -561,4 +616,4 @@ if (require.main === module) {
       process.exitCode = 1;
     });
 }
-module.exports = { run, identityPreflight, discover, isolation };
+module.exports = { run, identityPreflight, discover, isolation, selectedInstances, scopedReports, runtimeProbe };

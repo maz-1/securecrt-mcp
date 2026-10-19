@@ -1,9 +1,268 @@
 use super::*;
 
 #[cfg(unix)]
+fn test_manager() -> ConnectorManager {
+    ConnectorManager::new(
+        crate::policy::PolicyEngine::new(&crate::config::PolicyConfig::default()).unwrap(),
+        crate::audit::AuditLog::new(false, false, std::path::PathBuf::new()),
+    )
+}
+
+#[cfg(unix)]
+async fn guarded_fixture(
+    policy: crate::config::PolicyConfig,
+    audit: crate::audit::AuditLog,
+) -> (ConnectorManager, Arc<ExecTransport>) {
+    let manager = ConnectorManager::new(crate::policy::PolicyEngine::new(&policy).unwrap(), audit);
+    let transport = local_transport();
+    manager.sessions.lock().await.insert(
+        "openssh/guard-fixture".into(),
+        Arc::new(Session {
+            id: "openssh/guard-fixture".into(),
+            target: "local shell, no SSH".into(),
+            mode: ConnectorMode::Exec,
+            created: Instant::now(),
+            transport: SessionTransport::Exec(transport.clone()),
+        }),
+    );
+    (manager, transport)
+}
+
+#[cfg(unix)]
+fn guarded_params(command: &str) -> ConnectorExecParams {
+    ConnectorExecParams {
+        session_id: "openssh/guard-fixture".into(),
+        command: command.into(),
+        mode: None,
+        expected_prompt: None,
+        wait_for: None,
+        operation_id: None,
+        timeout_ms: Some(1000),
+        wait_ms: None,
+        max_bytes: None,
+        prefer_native_log: None,
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn openssh_policy_and_audit_rejections_send_nothing_to_the_transport() {
+    for mode in ["observe", "client", "safe", "allowlist"] {
+        let policy = crate::config::PolicyConfig {
+            mode: mode.into(),
+            custom_deny_patterns: vec!["guard_probe".into()],
+            ..Default::default()
+        };
+        let audit = crate::audit::AuditLog::new(false, false, std::path::PathBuf::new());
+        let (manager, transport) = guarded_fixture(policy, audit).await;
+        let error = manager
+            .exec(guarded_params("guard_probe=changed"))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::fault::details(&error)["sent"], false);
+        let probe = run_exec(
+            &transport,
+            "printf '%s' \"${guard_probe:-unchanged}\"",
+            1000,
+        )
+        .await;
+        assert_eq!(String::from_utf8(probe.output).unwrap(), "unchanged");
+    }
+    let audit_path = std::env::temp_dir()
+        .join(Uuid::new_v4().to_string())
+        .join("missing/audit.jsonl");
+    let audit = crate::audit::AuditLog::new(true, false, audit_path);
+    let (manager, transport) = guarded_fixture(Default::default(), audit).await;
+    let error = manager
+        .exec(guarded_params("guard_probe=changed"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        crate::fault::details(&error)["error_code"],
+        "audit_unavailable"
+    );
+    let probe = run_exec(
+        &transport,
+        "printf '%s' \"${guard_probe:-unchanged}\"",
+        1000,
+    )
+    .await;
+    assert_eq!(String::from_utf8(probe.output).unwrap(), "unchanged");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn openssh_batch_checks_every_command_before_the_first_send() {
+    let policy = crate::config::PolicyConfig {
+        custom_deny_patterns: vec!["forbidden".into()],
+        ..Default::default()
+    };
+    let (manager, transport) = guarded_fixture(
+        policy,
+        crate::audit::AuditLog::new(false, false, std::path::PathBuf::new()),
+    )
+    .await;
+    assert!(
+        manager
+            .batch(ConnectorBatchParams {
+                session_id: "openssh/guard-fixture".into(),
+                commands: vec!["guard_probe=changed".into(), "printf forbidden".into()],
+                operation_id: None,
+                on_error: Some("continue".into()),
+                timeout_ms: Some(1000),
+                prefer_native_log: None,
+            })
+            .await
+            .is_err()
+    );
+    let probe = run_exec(
+        &transport,
+        "printf '%s' \"${guard_probe:-unchanged}\"",
+        1000,
+    )
+    .await;
+    assert_eq!(String::from_utf8(probe.output).unwrap(), "unchanged");
+}
+
+#[tokio::test]
+async fn openssh_raw_and_interrupt_require_policy_and_before_send_audit() {
+    for mode in ["client", "observe"] {
+        let policy = crate::config::PolicyConfig {
+            mode: mode.into(),
+            allow_raw_send: mode == "observe",
+            allow_interrupt: mode == "observe",
+            ..Default::default()
+        };
+        let manager = ConnectorManager::new(
+            crate::policy::PolicyEngine::new(&policy).unwrap(),
+            crate::audit::AuditLog::new(false, false, std::path::PathBuf::new()),
+        );
+        let error = manager
+            .write(ConnectorWriteParams {
+                session_id: "no-session".into(),
+                text: "test".into(),
+                append_enter: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("raw input disabled"));
+        let error = manager
+            .interrupt(ConnectorSessionParams {
+                session_id: "no-session".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("interrupt disabled"));
+    }
+    let policy = crate::config::PolicyConfig {
+        allow_raw_send: true,
+        ..Default::default()
+    };
+    let audit_path = std::env::temp_dir()
+        .join(Uuid::new_v4().to_string())
+        .join("missing/audit.jsonl");
+    let manager = ConnectorManager::new(
+        crate::policy::PolicyEngine::new(&policy).unwrap(),
+        crate::audit::AuditLog::new(true, false, audit_path),
+    );
+    for error in [
+        manager.guard.raw("test", "test").await.unwrap_err(),
+        manager.guard.interrupt("test").await.unwrap_err(),
+    ] {
+        assert_eq!(
+            crate::fault::details(&error)["error_code"],
+            "audit_unavailable"
+        );
+        assert_eq!(crate::fault::details(&error)["sent"], false);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn openssh_repeat_returns_original_receipt_without_audit_or_resend() {
+    let path = std::env::temp_dir().join(format!("openssh-dedup-{}.jsonl", Uuid::new_v4()));
+    let (mut manager, transport) = guarded_fixture(
+        Default::default(),
+        crate::audit::AuditLog::new(true, false, path.clone()),
+    )
+    .await;
+    let mut params = guarded_params("counter=$((${counter:-0}+1)); printf '%s' \"$counter\"");
+    params.operation_id = Some("dedup-audit".into());
+    let original = manager.exec(params.clone()).await.unwrap();
+    let repeated = manager.exec(params.clone()).await.unwrap();
+    assert_eq!(repeated["command_id"], original["command_id"]);
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+    manager.guard = security::DispatchGuard::new(
+        crate::policy::PolicyEngine::new(&Default::default()).unwrap(),
+        crate::audit::AuditLog::new(
+            true,
+            false,
+            path.with_extension("missing").join("audit.jsonl"),
+        ),
+    );
+    let repeated = manager.exec(params.clone()).await.unwrap();
+    assert_eq!(repeated["command_id"], original["command_id"]);
+    assert_eq!(repeated["state"], "completed");
+    params.operation_id = Some("new-audit-failure".into());
+    assert_eq!(
+        crate::fault::details(&manager.exec(params).await.unwrap_err())["error_code"],
+        "audit_unavailable"
+    );
+    let probe = run_exec(&transport, "printf '%s' \"$counter\"", 1000).await;
+    assert_eq!(String::from_utf8(probe.output).unwrap(), "1");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn openssh_timed_out_operation_can_be_queried_without_clearing_its_interlock() {
+    let (manager, transport) = guarded_fixture(
+        Default::default(),
+        crate::audit::AuditLog::new(false, false, std::path::PathBuf::new()),
+    )
+    .await;
+    let mut params = guarded_params("sleep 0.3; printf finite-test");
+    params.operation_id = Some("dedup-timeout".into());
+    params.timeout_ms = Some(100);
+    let original = manager.exec(params.clone()).await.unwrap();
+    assert_eq!(original["state"], "unknown");
+    let repeated = manager.exec(params).await.unwrap();
+    assert_eq!(repeated["command_id"], original["command_id"]);
+    assert_eq!(repeated["state"], "unknown");
+    assert!(transport.unresolved.load(Ordering::SeqCst));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn openssh_allowed_command_writes_a_private_audit_before_dispatch() {
+    let path = std::env::temp_dir().join(format!("openssh-audit-{}.jsonl", Uuid::new_v4()));
+    let (manager, _) = guarded_fixture(
+        Default::default(),
+        crate::audit::AuditLog::new(true, false, path.clone()),
+    )
+    .await;
+    let result = manager
+        .exec(guarded_params("printf nonsecret-fixture"))
+        .await
+        .unwrap();
+    assert_eq!(result["exit_code"], 0);
+    let record: Value =
+        serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+    assert_eq!(record["event"], "dispatch_attempt");
+    assert_eq!(record["command_id"], result["command_id"]);
+    assert_eq!(record["command"], Value::Null);
+    assert_eq!(
+        record["command_sha256"],
+        sha256_hex("printf nonsecret-fixture")
+    );
+    drop(manager);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn batch_ledger_exhaustion_returns_prior_command_receipts() {
-    let manager = ConnectorManager::new();
+    let manager = test_manager();
     manager.sessions.lock().await.insert(
         "openssh/batch-fixture".into(),
         Arc::new(Session {
@@ -27,6 +286,7 @@ async fn batch_ledger_exhaustion_returns_prior_command_receipts() {
             operation_id: Some("capacity-batch".into()),
             on_error: None,
             timeout_ms: Some(1000),
+            prefer_native_log: None,
         })
         .await
         .unwrap();
@@ -63,6 +323,37 @@ fn local_transport() -> Arc<ExecTransport> {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn persistent_exec_preserves_exact_command_output() {
+    let transport = local_transport();
+    for (command, expected, code) in [
+        ("true", "", 0),
+        ("printf plain", "plain", 0),
+        ("printf 'line\\n'", "line\n", 0),
+        ("printf 'line\\n\\n'", "line\n\n", 0),
+        ("printf '中文\\nsecond'", "中文\nsecond", 0),
+        ("printf 'line\\r\\n'", "line\r\n", 0),
+        ("(exit 7)", "", 7),
+    ] {
+        let result = run_exec(&transport, command, 1000).await;
+        assert_eq!(result.state, "completed");
+        assert_eq!(result.output, expected.as_bytes());
+        assert_eq!(result.exit_code, Some(code));
+        assert!(!result.truncated);
+        assert!(!transport.unresolved.load(Ordering::SeqCst));
+    }
+    let result = run_exec(
+        &transport,
+        &format!("awk 'BEGIN {{for (i=0;i<{MAX_OUTPUT};i++) printf \"x\"}}'"),
+        10000,
+    )
+    .await;
+    assert_eq!(result.state, "completed");
+    assert_eq!(result.output.len(), MAX_OUTPUT);
+    assert!(!result.truncated);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn queued_command_is_rejected_if_the_session_became_unresolved() {
     let transport = local_transport();
     let guard = transport.command_lock.lock().await;
@@ -80,7 +371,7 @@ async fn queued_command_is_rejected_if_the_session_became_unresolved() {
 #[cfg(unix)]
 #[tokio::test]
 async fn partial_end_marker_is_not_exposed_as_timeout_output() {
-    let code = "import sys,re,time; line=sys.stdin.readline(); begin=re.search(r'MCP_BEGIN_[a-f0-9]+',line).group(); end=re.search(r'MCP_END_[a-f0-9]+',line).group(); sys.stdout.write(begin+'\\nuser-output\\n'+end[:20]); sys.stdout.flush(); time.sleep(1)";
+    let code = "import sys,re,time; time.sleep(0.25); print('fixture-ready',flush=True); line=sys.stdin.readline(); begin=re.search(r'MCP_BEGIN_[a-f0-9]+',line).group(); end=re.search(r'MCP_END_[a-f0-9]+',line).group(); sys.stdout.write(begin+'\\nuser-output\\n'+end[:20]); sys.stdout.flush(); time.sleep(1)";
     let mut child = Command::new("python3")
         .args(["-c", code])
         .stdin(Stdio::piped())
@@ -89,9 +380,18 @@ async fn partial_end_marker_is_not_exposed_as_timeout_output() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
+    // Deliberately start slower than 200 ms: fixture setup is not the capture's
+    // deadline. Wait for readiness without widening that deadline or retrying.
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut ready = String::new();
+    timeout(Duration::from_secs(5), stdout.read_line(&mut ready))
+        .await
+        .expect("Python fixture did not become ready")
+        .unwrap();
+    assert_eq!(ready, "fixture-ready\n");
     let transport = Arc::new(ExecTransport {
         stdin: Mutex::new(child.stdin.take().unwrap()),
-        stdout: Mutex::new(BufReader::new(child.stdout.take().unwrap())),
+        stdout: Mutex::new(stdout),
         child: Mutex::new(child),
         command_lock: Mutex::new(()),
         unresolved: AtomicBool::new(false),
@@ -181,7 +481,7 @@ async fn long_unterminated_lines_are_bounded_without_losing_completion() {
 #[cfg(unix)]
 #[tokio::test]
 async fn output_eviction_keeps_the_operation_ledger_and_never_replays() {
-    let manager = ConnectorManager::new();
+    let manager = test_manager();
     manager.sessions.lock().await.insert(
         "openssh/local-fixture".into(),
         Arc::new(Session {
@@ -202,6 +502,7 @@ async fn output_eviction_keeps_the_operation_ledger_and_never_replays() {
         timeout_ms: Some(1000),
         wait_ms: None,
         max_bytes: None,
+        prefer_native_log: None,
     };
     for index in 0..=MAX_COMMANDS {
         let value = manager.exec(params(index)).await.unwrap();

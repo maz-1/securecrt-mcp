@@ -112,11 +112,69 @@ pub struct BridgeClient {
     secret: Arc<BridgeSecret>,
     transport: Arc<Transport>,
     fast: Arc<OnceCell<bool>>,
+    native_log: Arc<OnceCell<bool>>,
     client_id: Arc<String>,
     counters: Arc<Counters>,
 }
 
 impl BridgeClient {
+    /// Read only this job's native raw log under its authenticated file-IPC instance.
+    /// Never accept a bridge-supplied arbitrary path or follow a reparse point.
+    pub async fn capture_log_path(
+        &self,
+        session: &str,
+        id: &str,
+        supplied: &str,
+    ) -> Result<PathBuf> {
+        let Transport::File { state } = self.transport.as_ref() else {
+            anyhow::bail!("native raw log requires file IPC");
+        };
+        let instance = session.split('/').next().context("missing instance")?;
+        ensure!(
+            Uuid::parse_str(instance).is_ok() && Uuid::parse_str(id).is_ok(),
+            "invalid capture log identity"
+        );
+        let name = if Path::new(supplied).file_name().and_then(|n| n.to_str())
+            == Some(format!("{id}.capture.log").as_str())
+        {
+            format!("{id}.capture.log")
+        } else {
+            format!("{id}.capture.raw")
+        };
+        let expected = state.root.join("instances").join(instance).join(&name);
+        ensure!(
+            Path::new(supplied) == expected,
+            "capture log path does not match the owned job"
+        );
+        let root = fs::canonicalize(&state.root).await?;
+        let mut checked = state.root.clone();
+        for part in ["instances", instance, &name] {
+            checked.push(part);
+            let metadata = fs::symlink_metadata(&checked).await?;
+            ensure!(
+                !metadata.file_type().is_symlink(),
+                "capture log links are not permitted"
+            );
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                ensure!(
+                    metadata.file_attributes() & 0x400 == 0,
+                    "capture log reparse points are not permitted"
+                );
+            }
+        }
+        ensure!(
+            fs::canonicalize(&expected).await? == root.join("instances").join(instance).join(&name),
+            "capture log escaped its instance directory"
+        );
+        ensure!(
+            fs::metadata(&expected).await?.is_file(),
+            "capture log is not a file"
+        );
+        Ok(expected)
+    }
+
     pub fn new(config: BridgeConfig, secret: BridgeSecret) -> Result<Self> {
         ensure!(
             config.host == "127.0.0.1" && secret.host == config.host && secret.port == config.port,
@@ -164,6 +222,7 @@ impl BridgeClient {
             secret: Arc::new(secret),
             transport: Arc::new(transport),
             fast: Arc::new(OnceCell::new()),
+            native_log: Arc::new(OnceCell::new()),
             client_id: Arc::new(Uuid::new_v4().to_string()),
             counters: Arc::new(Counters::default()),
         }
@@ -174,6 +233,11 @@ impl BridgeClient {
             .fast
             .get_or_try_init(|| async {
                 let info = self.call("ping", json!({})).await?;
+                let native_log = matches!(self.transport.as_ref(), Transport::File { .. })
+                    && info["capabilities"]
+                        .as_array()
+                        .is_some_and(|c| c.iter().any(|v| v == "native_log_capture"));
+                let _ = self.native_log.set(native_log);
                 Ok::<bool, anyhow::Error>(
                     info["capabilities"]
                         .as_array()
@@ -182,19 +246,73 @@ impl BridgeClient {
             })
             .await?)
     }
+    pub async fn supports_native_log(&self) -> Result<bool> {
+        self.supports_fast().await?;
+        Ok(*self.native_log.get().unwrap_or(&false))
+    }
+
+    pub async fn attachment_runtime(&self, id: &str) -> Result<Value> {
+        let params = if matches!(self.transport.as_ref(), Transport::File { .. }) {
+            json!({"attachment_id": id})
+        } else {
+            json!({})
+        };
+        self.call("ping", params).await
+    }
+
+    /// Stop one explicitly selected idle Windows generation; never broadcast or retry.
+    pub async fn stop_native_host(&self, instance: &str) -> Result<Value> {
+        let Transport::File { state } = self.transport.as_ref() else {
+            anyhow::bail!("normal native stop requires Windows file IPC");
+        };
+        let directory = require_file_instance(&state.root, instance).await?;
+        let runtime = self
+            .call_file_instance("ping", json!({}), state, instance, &directory)
+            .await?;
+        ensure!(
+            runtime["platform"] == "Windows"
+                && runtime["capabilities"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(|v| v == "graceful_stop")),
+            "loaded bridge does not support normal stop; upgrade and reload it first"
+        );
+        self.call_file_instance(
+            "stop_host",
+            json!({"confirmed_idle":true,"bridge_instance":instance,"adapter_sha256":runtime["adapter_sha256"]}),
+            state,
+            instance,
+            &directory,
+        ).await
+    }
 
     /// Doctor validates every process, rather than the representative ping used
     /// for fast-path negotiation. No remote input is sent by these requests.
     pub async fn runtime_reports(&self) -> Result<Vec<Value>> {
+        self.runtime_reports_for(None).await
+    }
+
+    /// Validate a requested instance before pinging; never substitute another host.
+    pub async fn runtime_reports_for(&self, selected: Option<&str>) -> Result<Vec<Value>> {
         match self.transport.as_ref() {
             Transport::Tcp { .. } => {
+                ensure!(
+                    selected.is_none(),
+                    "instance selection requires native file IPC"
+                );
                 Ok(vec![json!({"runtime":self.call("ping",json!({})).await?})])
             }
             Transport::File { state } => {
-                let instances = self.file_instances(state).await?;
+                let mut instances = self.file_instances(state).await?;
+                if let Some(selected) = selected {
+                    instances.retain(|(instance, _)| instance == selected);
+                    ensure!(
+                        !instances.is_empty(),
+                        "selected native instance is not online"
+                    );
+                }
                 ensure!(
                     !instances.is_empty(),
-                    "Xshell bridge is not running; start its script"
+                    "Terminal bridge is not running; start its script"
                 );
                 let calls = instances.iter().map(|(instance, path)| async move {
                     match self
@@ -331,7 +449,14 @@ impl BridgeClient {
                 break;
             }
         }
-        self.finish_response(serde_json::from_slice(&frame)?, &id)
+        let response: Value = serde_json::from_slice(&frame)?;
+        let persistent = response["persistent"].as_bool() == Some(true);
+        let result = self.finish_response(response, &id);
+        if result.is_ok() && persistent && connection.reader.buffer().is_empty() {
+            connection.used = Instant::now();
+            *guard = Some(connection);
+        }
+        result
     }
 
     async fn file_instances(&self, state: &FileTransport) -> Result<Vec<(String, PathBuf)>> {
@@ -527,6 +652,7 @@ impl BridgeClient {
         fs::rename(&temporary, &request).await?;
         self.counters.connects.fetch_add(1, Ordering::Relaxed);
         let deadline = Instant::now() + Duration::from_millis(self.config.request_timeout_ms);
+        let mut poll_delay_ms = 1;
         loop {
             match read_ipc(
                 &response_path,
@@ -552,7 +678,10 @@ impl BridgeClient {
                     "Terminal IPC timeout: outcome may be unknown; NEVER automatically replay a command"
                 ));
             }
-            sleep(Duration::from_millis(20)).await;
+            // Fast replies need not pay a fixed 20 ms floor on every RPC.
+            // Back off for native waits; poll only this response, never resend.
+            sleep(Duration::from_millis(poll_delay_ms)).await;
+            poll_delay_ms = (poll_delay_ms * 2).min(20);
         }
     }
 
@@ -612,5 +741,77 @@ mod file_read_tests {
         assert!(read_ipc(&path, Duration::from_millis(30)).await.is_err());
         drop(held);
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod capture_log_tests {
+    use super::*;
+    #[tokio::test]
+    async fn capture_paths_are_bound_to_the_exact_instance_and_job() {
+        let root = std::env::temp_dir().join(format!("capture-root-{}", Uuid::new_v4()));
+        let instance = Uuid::new_v4().to_string();
+        let id = Uuid::new_v4().to_string();
+        let directory = root.join("instances").join(&instance);
+        fs::create_dir_all(&directory).await.unwrap();
+        let owned = directory.join(format!("{id}.capture.raw"));
+        fs::write(&owned, b"owned output").await.unwrap();
+        let secret = BridgeSecret {
+            host: "127.0.0.1".into(),
+            port: 8765,
+            token: "fixture-only".into(),
+            max_request_bytes: MAX_FRAME,
+            ipc_dir: Some(root.to_string_lossy().into_owned()),
+        };
+        let client = BridgeClient::new_file(BridgeConfig::default(), secret, root.clone()).unwrap();
+        let session = format!("{instance}/session/1");
+        assert_eq!(
+            client
+                .capture_log_path(&session, &id, &owned.to_string_lossy())
+                .await
+                .unwrap(),
+            owned
+        );
+        assert!(
+            client
+                .capture_log_path(
+                    &session,
+                    &Uuid::new_v4().to_string(),
+                    &owned.to_string_lossy()
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .capture_log_path(&Uuid::new_v4().to_string(), &id, &owned.to_string_lossy())
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .capture_log_path(
+                    &session,
+                    &id,
+                    &root.join("private-secret").to_string_lossy()
+                )
+                .await
+                .is_err()
+        );
+        #[cfg(unix)]
+        {
+            fs::remove_file(&owned).await.unwrap();
+            let outside = root.join("unrelated-file");
+            fs::write(&outside, b"unrelated").await.unwrap();
+            std::os::unix::fs::symlink(&outside, &owned).unwrap();
+            assert!(
+                client
+                    .capture_log_path(&session, &id, &owned.to_string_lossy())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(fs::read(&outside).await.unwrap(), b"unrelated");
+        }
+        fs::remove_dir_all(root).await.unwrap();
     }
 }

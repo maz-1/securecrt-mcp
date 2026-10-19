@@ -2,6 +2,45 @@
 
 # Changelog
 
+## [0.5.7] - 2026-10-14
+
+- Stop Windows native bridges normally through an explicitly selected, authenticated and idle-confirmed host; keep SSH connections open and avoid the terminal's forced-cancellation warning.
+- Include guarded SecureCRT/Xshell stop launchers in Windows bundles and use clear professional startup messages.
+- Keep consecutive file IPC exchanges responsive for a bounded 25 ms burst, then restore normal native idle waits.
+- Correct Windows native recovery guidance and scope desktop diagnostics/lifecycle identity to the selected test instances and tabs.
+- Remove only the OpenSSH command envelope's final separator LF; preserve exact empty/no-newline output, real blank lines and the output limit.
+- Regress the Mac 0.5.6 changes on Windows, with same-host native SSH performance measurements and preserved failed receipts.
+
+## [0.5.6] - 2026-10-14
+
+- Apply operator command/raw-input/interrupt policy and before-send audit to OpenSSH, with batch preflight before any command is sent.
+- Retrieve an existing OpenSSH operation receipt before checking the current audit sink or unresolved session, without creating another dispatch attempt or clearing uncertainty.
+- Require fresh full-screen tokens for Mac idle recovery; retained attachments cannot bypass prompt validation.
+- Yield after Mac native Tab activation and revalidate before sending; retain the original capture budget.
+- Reuse successfully negotiated TCP connections without retrying failed exchanges.
+- Include prompt restoration in newly generated Codex terminal toolsets and query the bound native instance for recovery capabilities.
+- Support GNU/BSD script transfer, shasum fallback and checksum filenames containing backslashes; add the contract to Linux/macOS CI.
+
+## [0.5.5] - 2026-10-14
+
+- Preserve delayed Windows capture output and report native capture loss separately from command completion.
+- Add explicit, guarded one-Enter prompt restoration, stable full-frame tokens and owned attachment renewal.
+- Reduce file IPC latency and add opt-in SecureCRT raw logs and Xshell UTF-8/UTF-16 session logs for POSIX commands and batches; preserve existing user logging and restore runtime settings.
+- Match Xshell native multi-row newline semantics, bound saturated-scrollback recovery to exact owned marker frames, verify short waits at runtime and drain the owned SecureCRT receive transition when leaving raw logging.
+- Fence native host generations without retaining a lock across SDK calls; require explicit stopped/idle confirmation for legacy-lock migration.
+- Return structured MCP results, support bounded screen context and provide a verified script-chunk caller helper.
+- Install locked Windows executables alongside their exact digest without stopping existing clients.
+- Add native capture/performance regressions and improve portable Mac contract execution on Windows.
+
+## [0.5.4] - 2026-10-13
+
+- Synchronize the Unix partial-marker timeout fixture with interpreter readiness; retain the 200 ms capture deadline and all output assertions despite slow process startup.
+
+- Add a Chinese/English Windows quickstart covering installation, native script loading, client registration, daily use, upgrades and troubleshooting.
+- Keep Windows installer results visible; provide path lookup, separate SecureCRT/Xshell checks and initialization without Codex registration. Preserve nonzero errors and existing configuration.
+- Exercise actual packaged CMD launchers in isolated Windows profiles, including repeat installation, configuration/token preservation and failure cases.
+- Fix the Chinese README mirror and include all user entry points in package validation. Terminal execution behavior and protocol remain unchanged.
+
 ## Unreleased — 2026-10-09
 
 - Keep only the minimum macOS SecureCRT Python native layer; remove Windows Python/Xshell adapters and migrate build, package, client, desktop acceptance and regression controllers to JS/Rust. Windows installed users need no Python, Node, pywin32 or Rust.

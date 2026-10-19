@@ -31,6 +31,7 @@ use tokio::{
 use uuid::Uuid;
 
 mod exec;
+mod security;
 use exec::run_exec;
 
 const MAX_OUTPUT: usize = 1_048_576;
@@ -101,6 +102,21 @@ pub struct ConnectorInterruptParams {
 #[serde(deny_unknown_fields)]
 pub struct ConnectorScreenParams {
     pub session_id: String,
+    /// Return only context and a fresh recovery token, omitting screen history.
+    pub context_only: Option<bool>,
+    /// Limit returned screen text to this many trailing lines (1..200).
+    pub tail_lines: Option<usize>,
+    /// UTF-8 byte limit for returned screen text (4..65536).
+    pub max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorRestorePromptParams {
+    pub session_id: String,
+    pub confirmed_idle: bool,
+    pub screen_token: String,
+    pub expected_prompt: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -125,6 +141,9 @@ pub struct ConnectorExecParams {
     pub timeout_ms: Option<u64>,
     pub wait_ms: Option<u64>,
     pub max_bytes: Option<usize>,
+    /// Opt-in Windows SecureCRT/Xshell POSIX acceleration. A private temporary log
+    /// contains command echo and output; existing session logging is preserved.
+    pub prefer_native_log: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -164,6 +183,9 @@ pub struct ConnectorBatchParams {
     /// outcomes always stop the batch.
     pub on_error: Option<String>,
     pub timeout_ms: Option<u64>,
+    /// Explicit native-log preference for this batch; Windows SecureCRT/Xshell
+    /// POSIX only. Includes command echo/output on local disk; defaults off.
+    pub prefer_native_log: Option<bool>,
 }
 
 struct RingBuffer {
@@ -280,16 +302,22 @@ struct ExecOutcome {
     native_read_count: u64,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ConnectorManager {
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
     commands: Arc<Mutex<HashMap<String, CommandRecord>>>,
     operations: Arc<Mutex<HashMap<String, (String, String)>>>,
+    guard: security::DispatchGuard,
 }
 
 impl ConnectorManager {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(policy: crate::policy::PolicyEngine, audit: crate::audit::AuditLog) -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            commands: Arc::new(Mutex::new(HashMap::new())),
+            operations: Arc::new(Mutex::new(HashMap::new())),
+            guard: security::DispatchGuard::new(policy, audit),
+        }
     }
 
     pub async fn list(&self) -> Result<Value> {
@@ -372,16 +400,6 @@ impl ConnectorManager {
         ensure!((4..=MAX_PAGE).contains(&max), "invalid max_bytes");
         let timeout_ms = p.timeout_ms.unwrap_or(30_000);
         ensure!((100..=600_000).contains(&timeout_ms), "invalid timeout_ms");
-        let session = self.session(&p.session_id).await?;
-        let SessionTransport::Exec(transport) = &session.transport else {
-            return Err(anyhow!(
-                "connector session is PTY mode; use connector_stream_*"
-            ));
-        };
-        ensure!(
-            !transport.unresolved.load(Ordering::SeqCst),
-            "session unresolved; inspect or close and reopen before sending"
-        );
         let operation_id = p.operation_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         ensure!(
             !operation_id.is_empty()
@@ -397,28 +415,41 @@ impl ConnectorManager {
             timeout_ms
         ]))?);
         let command_id = Uuid::new_v4().to_string();
-        let existing_command = {
+        let transport = {
             let mut operations = self.operations.lock().await;
             if let Some((old, old_fingerprint)) = operations.get(&operation_id) {
                 ensure!(
                     old_fingerprint == &fingerprint,
                     "operation_id conflict; nothing sent"
                 );
-                Some(old.clone())
-            } else {
-                ensure!(
-                    operations.len() < MAX_OPERATIONS,
-                    "operation ledger limit; finish and inspect work before restarting"
-                );
-                operations.insert(operation_id.clone(), (command_id.clone(), fingerprint));
-                None
+                let old = old.clone();
+                drop(operations);
+                return self.command_status(&old).await;
             }
+            ensure!(
+                operations.len() < MAX_OPERATIONS,
+                "operation ledger limit; finish and inspect work before restarting"
+            );
+            let session = self.session(&p.session_id).await?;
+            let SessionTransport::Exec(transport) = &session.transport else {
+                return Err(anyhow!(
+                    "connector session is PTY mode; use connector_stream_*"
+                ));
+            };
+            ensure!(
+                !transport.unresolved.load(Ordering::SeqCst),
+                "session unresolved; inspect or close and reopen before sending"
+            );
+            // A repeat only retrieves its original receipt. Audit and reserve
+            // exactly one new dispatch while holding the operation gate.
+            self.guard
+                .command(&p.session_id, &command_id, &p.command)
+                .await?;
+            operations.insert(operation_id.clone(), (command_id.clone(), fingerprint));
+            transport.clone()
         };
-        if let Some(existing_command) = existing_command {
-            return self.command_status(&existing_command).await;
-        }
         let created = Instant::now();
-        let outcome = run_exec(transport, &p.command, timeout_ms).await;
+        let outcome = run_exec(&transport, &p.command, timeout_ms).await;
         let output_bytes = outcome.output.len();
         let record = CommandRecord {
             session_id: p.session_id,
@@ -464,6 +495,15 @@ impl ConnectorManager {
             ["stop", "continue"].contains(&on_error),
             "on_error must be stop or continue"
         );
+        for command in &p.commands {
+            validate_command(command)?;
+            let decision = self.guard.policy.classify_command(command);
+            ensure!(
+                decision.decision == crate::policy::Decision::Allow,
+                "{}",
+                decision.reason
+            );
+        }
         let batch_id = p
             .operation_id
             .clone()
@@ -486,6 +526,7 @@ impl ConnectorManager {
                     timeout_ms: p.timeout_ms,
                     wait_ms: None,
                     max_bytes: Some(1024),
+                    prefer_native_log: p.prefer_native_log,
                 })
                 .await
             {
@@ -586,6 +627,7 @@ impl ConnectorManager {
 
     pub async fn write(&self, p: ConnectorWriteParams) -> Result<Value> {
         validate_text(&p.text)?;
+        self.guard.raw(&p.session_id, &p.text).await?;
         let session = self.session(&p.session_id).await?;
         let SessionTransport::Pty(transport) = &session.transport else {
             return Err(anyhow!("connector_write requires a PTY session"));
@@ -630,6 +672,7 @@ impl ConnectorManager {
     }
 
     pub async fn interrupt(&self, p: ConnectorSessionParams) -> Result<Value> {
+        self.guard.interrupt(&p.session_id).await?;
         let session = self.session(&p.session_id).await?;
         match &session.transport {
             SessionTransport::Pty(transport) => {
@@ -833,6 +876,15 @@ fn spawn_pty(
         pixel_height: 0,
     })?;
     let mut command = CommandBuilder::new("ssh");
+    #[cfg(windows)]
+    {
+        // Match exec's inherited client environment instead of letting the
+        // terminal library's registry refresh replace explicit client values.
+        command.env_clear();
+        for (key, value) in std::env::vars_os() {
+            command.env(key, value);
+        }
+    }
     if let Some(path) = config_path {
         command.arg("-F");
         command.arg(path);

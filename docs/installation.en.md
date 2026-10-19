@@ -2,6 +2,8 @@
 
 [简体中文](installation.md) · [English](installation.en.md) · [Documentation map](README.en.md) · [Agent setup prompt](agent-setup.md#english-prompt) · [Codex](clients/codex.en.md) · [Claude](clients/claude.en.md)
 
+Windows users can begin with [Start here](../START-HERE.en.md). Version 0.5.7 bundles include an installer that keeps results visible, path lookup and separate terminal checks. Detailed source, configuration and upgrade instructions follow.
+
 This page describes **current main**, not every published ZIP. Desktop bridges reuse existing terminal logins; OpenSSH is a separate, explicitly chosen connection.
 
 ## 1. Select and verify the source
@@ -96,11 +98,13 @@ See [Codex configuration](clients/codex.en.md) ([中文](clients/codex.md)) and 
 
 Use the path printed during initialization or by `paths`. On Windows a current bundle may also contain self-contained `.js` entries that release their matching Rust binary; that is separate from `install`'s Codex configuration step.
 
-When the intended terminal is idle and the user has authorized loading the bridge, choose **Script → Run** and the printed entry. SecureCRT requires one script per process, covering its connected tabs. Duplicate starts retain the original instance; cancel through **Script → Cancel** in the original launching tab. Cancellation preserves SSH login but does not prove remote work has ended. Xshell uses actual native discovery/instance scope; do not assume all windows are covered.
+When the intended terminal is idle and the user has authorized loading the bridge, choose **Script → Run** and the printed entry. SecureCRT requires one script per process, covering its connected tabs. Duplicate starts retain the original instance. Current Windows bridges normally stop through `stop-securecrt.cmd` / `stop-xshell.cmd`: confirm there is no active or unresolved command and select one explicit instance, or enter `0` to cancel selection. Normal stop preserves SSH logins. Older bridges and macOS use **Script → Cancel** in the original launching tab; cancellation does not prove remote work has ended. Xshell uses actual native discovery/instance scope; do not assume all windows are covered.
 
 macOS SecureCRT does not have the Windows JScript/ActiveX scripting interface. Reuse an already loadable Python engine. If loading fails, follow the installed SecureCRT version's supported Python version/architecture and restart SecureCRT after installing the official runtime. No `pip`, pywin32 or global PATH changes are required. The terminal loader still decides what can load; the bridge adds no arbitrary Python upper bound after loading and API/source checks. [Vendor scripting platforms](https://www.vandyke.com/products/securecrt/scripts.html) · [macOS engine loading](https://www.vandyke.com/support/tips/how-to-use-python-scripting-securecrt-on-macos.html)
 
 See the [support matrix](support-matrix.md) for tested versions/architectures. Linux desktop SecureCRT is unverified in the current matrix. Source builders need Rust 1.88+ and a linker; Node 22 is a development/test/package dependency and Python is also used by Mac adapter contract tests. These are distinct from installed end-user requirements.
+
+Online Windows `doctor` returns JSON diagnostics per instance and checks all online instances by default. Use `doctor --backend securecrt --instance <UUID>` (or `xshell`) to check only that instance. A missing target fails without probing another host. The macOS TCP bridge retains its existing text report.
 
 ## 4. Check each layer separately
 
@@ -124,4 +128,20 @@ With a newly verified binary, Codex users rerun `install`; Claude-only users ret
 
 The desktop `connector_exec` default capture mode changes from `snapshot` to `posix`: calls omitting `mode` use POSIX shell completion markers and no longer need routine idle acknowledgement after normal completion. Non-POSIX targets and callers relying on the old snapshot behavior must explicitly select a suitable mode. Low-level capture defaults, explicit modes and uncertainty recovery remain unchanged.
 
-Replacing files does not reload running scripts. At an authorized idle boundary, cancel the old script, load the fixed entry, restart MCP, run doctor and discover/bind new targets. Old handles are invalid. For unresolved work, inspect the original tab before any cancellation or recovery. See [troubleshooting](troubleshooting.md) and [desktop acceptance](desktop-acceptance.md).
+On Windows, if the running installed image is locked, `install` places the new exact build alongside it under its SHA-256 and updates only the existing securecrt MCP command to that absolute path, retaining approvals, tool restrictions and other configuration. The running old process is left alone; reload the client to use the new program. Old versions are not automatically deleted. Claude-only registration paths are not automatically migrated and require a verified manual update.
+
+Replacing files does not reload running scripts. At an authorized idle boundary, normally stop the current Windows bridge (older bridges and macOS use native cancellation), load the fixed entry, restart MCP, run doctor and discover/bind new targets. Old handles are invalid. For unresolved work, inspect the original tab before any cancellation or recovery. See [troubleshooting](troubleshooting.md) and [desktop acceptance](desktop-acceptance.md).
+
+## Windows native cancellation and legacy-lock migration
+
+The new Windows bridge uses a short file critical section and generation-bound owner record instead of holding a lock throughout SDK receive calls. An idle script cancelled in the actual UI can be reloaded. Captures or unresolved work prevent stale takeover. A resumed old generation checks ownership before sending and stops without cleaning the new generation's terminal state. The five-second heartbeat grace applies only to generations with no captures or unresolved work.
+
+Some older SecureCRT engines skip script finally during UI cancellation and retain the legacy lease handle. Only after actual UI cancellation and confirmation that the original test tab is idle with no unresolved captures, explicitly record migration:
+
+```powershell
+securecrt-mcp repair-native-host --host-pid VERIFIED_NATIVE_PID --previous-instance VERIFIED_OLD_INSTANCE --confirmed-script-stopped --confirmed-idle
+```
+
+Use identities from the original host diagnostic. The receipt expires in 60 seconds and binds the old generation, host and current source. Reload the installed entry through the actual UI within that window. This never closes the old OS handle, kills a terminal or reconnects SSH. Active/unresolved generations, mismatched identities and link paths are rejected. Replacing installed files alone does not reload scripts.
+
+Unreadable or unpersisted owner state stops the bridge and requires inspection of the original terminal. Missing or corrupt records never establish idle. The short lock is not a reason to delete owner state to bypass remote-command uncertainty.

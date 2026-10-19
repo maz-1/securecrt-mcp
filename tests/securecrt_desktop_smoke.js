@@ -75,6 +75,7 @@ async function run(a) {
       mode: "posix",
       timeout_ms: 10000,
       wait_ms: 0,
+      prefer_native_log:a.prefer_native_log==="true",
       ...options,
     });
     if (["starting", "running"].includes(v.state))
@@ -107,6 +108,10 @@ async function run(a) {
     const first = await execute(sid, "printf 'SCRT_MCP_DESKTOP_OK\\n'", {
       operation_id: "desktop-dedup",
     });
+    report.initial_capture = Object.fromEntries(
+      ["state", "sent", "exit_code", "error_code", "requires_idle_ack",
+       "capture_may_be_incomplete", "begin_marker_observed", "end_marker_observed", "wall_ms"]
+        .map(key => [key, first[key]]));
     check(
       "POSIX marker completion",
       first.state === "completed" &&
@@ -133,6 +138,7 @@ async function run(a) {
     let batch = await mcp.tool("connector_exec_batch", {
       session_id: sid,
       commands: ["hostname", "uptime", "pwd"],
+      prefer_native_log:a.prefer_native_log==="true",
     });
     const until = Date.now() + 20000;
     while (batch.state === "running" && Date.now() < until) {
@@ -221,7 +227,7 @@ async function run(a) {
         { length: 2500 },
         (_, i) => String(i).padStart(4, "0") + "_中文_0123456789abcdef",
       );
-    const exact = JSON.stringify(lines) === JSON.stringify(expected);
+    const exact = JSON.stringify(lines) === JSON.stringify(expected) && text.replace(/\r\n/g,"\n").trimEnd() === expected.join("\n");
     report.large_output_integrity = {
       rows: lines.length,
       expected_rows: 2500,
@@ -287,6 +293,7 @@ async function run(a) {
         mode: "posix",
         timeout_ms: 1000,
         wait_ms: 10000,
+        prefer_native_log:a.prefer_native_log==="true",
       });
       report.timeout_probe = Object.fromEntries(
         ["state", "exit_code", "sent", "error_code", "requires_idle_ack"].map(
@@ -351,6 +358,7 @@ async function run(a) {
         mode: "posix",
         timeout_ms: 20000,
         wait_ms: 0,
+        prefer_native_log:a.prefer_native_log==="true",
       });
       await sleep(100);
       const interrupted = await mcp.tool("connector_interrupt", {
