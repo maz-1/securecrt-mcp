@@ -23,7 +23,7 @@ SCRIPT_SHA256 = None
 PROTOCOL_VERSION = 2
 MAX_FRAME = 262144
 MAX_CHUNK = 65536
-LEASE_MS = 120000
+LEASE_MS = 900000
 SCREEN_MS = 30000
 WATCHDOG_MS = 10000
 PROMPT_READINESS_MS = 500
@@ -186,7 +186,8 @@ class NativeAdapter:
                 e = dict(tab=tab, metadata=metadata(tab), revoked=False, expires=self.now() + LEASE_MS)
                 self.sessions[sid] = e
             result.append(dict(id=sid, index=index, caption=tab.Caption, connected=True,
-                               lease_expires_ms=e['expires'], unresolved=self.unresolved_sessions.get(sid), **e['metadata']))
+                               lease_expires_ms=e['expires'], expires_in_ms=max(0, e['expires']-self.now()),
+                               unresolved=self.unresolved_sessions.get(sid), **e['metadata']))
         return dict(bridge_instance=self.instance, sessions=result,
                     unresolved=self.unresolved, unresolved_sessions=list(self.unresolved_sessions.values()),
                     max_active_captures=16)
@@ -512,19 +513,19 @@ class NativeAdapter:
             line = context['current_line']
             if (not line.endswith(('$', '#', '%'))
                     or any(x in line.lower() for x in ('password', 'passphrase', '--more--', '密码'))):
-                fail('input_context_required: inspect terminal and provide an explicit expected_prompt')
+                fail('input_context_required: automatic binding requires an idle prompt ending in #, $ or % and excludes password/pager contexts; inspect with connector_read_screen or connector_open(attach_mode=observe); only after confirming an idle shell, reopen with explicit expected_prompt')
         aid = self.instance + '/attachment/' + str(uuid.uuid4())
         self.attachments[aid] = dict(session=session, entry=e, mode=mode, context=context,
                                     owner=self.owner, expires=self.now()+600000)
         return dict(attachment_id=aid, session=session, mode=mode, current_line=context['current_line'],
-                    lease_expires_ms=self.now()+600000, configured_endpoint=e['metadata'],
+                    lease_expires_ms=self.attachments[aid]['expires'], expires_in_ms=max(0, self.attachments[aid]['expires']-self.now()), configured_endpoint=e['metadata'],
                     configured_endpoint_fingerprint=hashlib.sha256(json.dumps(e['metadata'],sort_keys=True).encode()).hexdigest(),
                     authenticated_host_fingerprint=None, native_keyboard_lock=False,
                     input_detection='sampled-context-only', unresolved=self.unresolved_sessions.get(session))
 
     def _attachment(self, attachment_id, write=False):
         a = self.attachments.get(attachment_id)
-        if not a or self.now() > a['expires'] or not self._alive(a['entry']): fail('stale_attachment: attach again after inspecting the target')
+        if not a or self.now() > a['expires'] or not self._alive(a['entry']): fail('stale_attachment: expired (TTL 600s) or native session changed; call connector_list, inspect the intended target, then connector_open(target=<id>) and use its new session_id; never replay uncertain commands')
         if a['owner'] != self.owner: fail('ownership_conflict')
         if write and a['mode'] == 'observe': fail('observe attachment does not permit writes')
         a['expires'] = self.now() + 600000
@@ -605,6 +606,7 @@ class NativeAdapter:
     def heartbeat(self, attachment_id):
         a = self._attachment(attachment_id)
         return dict(attachment_id=attachment_id, session=a['session'], lease_expires_ms=a['expires'],
+                    expires_in_ms=max(0, a['expires']-self.now()),
                     context_unchanged=self._input(a['entry']) == a['context'],
                     unresolved=self.unresolved_sessions.get(a['session']))
 

@@ -28,19 +28,43 @@ then probes those names with `SelectTabName`. Every Xshell process registers an
 isolated file-IPC instance; Rust aggregates live instances and routes
 attachments back to their originating process. Its `connector_list` result
 reports `enumeration: "instance_registry"`; session file contents are never
-read. Both
-The `connector_list` response distinguishes the native `id` (use it as
-`connector_open.target`) from the backend-qualified
+read.
+The `connector_list` response distinguishes the native `id` from the backend-qualified
 `session_id` (`securecrt/discovered/<id>` or `xshell/discovered/<id>`).
-A discovered `session_id` is valid for read-only `connector_get_status` and
-`connector_heartbeat`: both revalidate the exact native session, but do not
+Both are accepted as `connector_open.target` for the matching backend; an attachment
+ID or another backend's discovered ID is rejected. A discovered `session_id` is valid for read-only `connector_read_screen`, `connector_get_status` and
+`connector_heartbeat`: all revalidate the exact native session, but do not
 create an attachment or renew an attachment lease. `connector_open` returns a
 different attachment-backed `session_id` required for commands and attachment
 lease renewal. It also supports `connector_exec_batch`, `connector_read_screen`,
 `connector_interrupt`, `connector_acknowledge`, and `connector_close`.
 Neither backend is a native PTY. The unified list result
 exposes discovery as `xshell_enumeration` and reports probe counts and
-per-name errors in `xshell_discovery`.
+per-name errors in `xshell_discovery`. Set `connector_list.backend` to query only
+one backend; unavailable Xshell diagnostics are returned only for explicit
+`backend="xshell"` queries.
+
+`connector_open.mode` selects a channel: desktop backends require `exec`;
+OpenSSH also supports `pty`. It is distinct from `connector_exec.mode`.
+Desktop `attach_mode` selects `shared` (default), `exclusive`, or `observe`.
+Observation does not require an idle prompt and cannot send commands. It is
+safe to inspect a pager this way, but observation does not authorize exiting it.
+After confirming an idle shell, close the observer and reopen shared/exclusive;
+provide the exact `expected_prompt` for a nonstandard prompt. No automatic
+upgrade, acknowledgement, key press or command retry occurs.
+
+Updated native adapters retain discovered handles for 900 seconds of inactivity;
+read-only native session checks renew that lease. SecureCRT caption changes are
+display updates, not identity changes. Handles are still bound to the native
+object/endpoint and bridge generation, not permanent host/user aliases. Observed
+disconnects, endpoint changes or bridge restart invalidate them; Windows also
+rejects index changes. Attachments retain a 600-second owner lease; use
+`connector_heartbeat` during long analysis pauses. List/open/heartbeat include
+`expires_in_ms` for their respective lease. Screen reads do not renew attachment
+leases. Lease expiry or process restart requires list → inspect → open → use the
+new attachment session_id. Never replay an uncertain command as part of recovery.
+Handle suffixes are opaque: the Windows counter is shared with attachment,
+screen and capture handles, so sequence gaps do not indicate session replacement.
 
 For SecureCRT/Xshell, omitting `connector_exec.mode` defaults to `posix`:
 the caller must have inspected an idle POSIX shell. Completion markers provide
@@ -49,15 +73,36 @@ input contexts require an explicit suitable mode such as `prompt` or `snapshot`.
 Explicit `snapshot` still leaves completion unknown and requires recovery.
 Timeouts, lost replies and unresolved work retain their inspection and explicit
 acknowledgement requirements; no command is retried automatically.
+`prompt` mode requires a nonempty literal `wait_for` (up to 512 bytes, no control
+characters); `expected_prompt` validates the pre-send boundary and is not a
+substitute. The schema advertises this conditional requirement on `connector_exec`,
+not `connector_open`. Prompt completion requires that literal in captured output,
+not a leftover screen prompt. It returns `state="completed"`,
+`execution_state="completed_unverified"`, `exit_code=null`: capture reached the
+requested literal, but command exit is unverified. POSIX markers remain the
+preferred evidence for an inspected POSIX shell; callers need not add their own.
 
 Updated Windows bridges additionally advertise `restore_prompt` and support
 `connector_restore_prompt` with explicit idle confirmation, a fresh screen
 token and the original prompt. Only a completed owned capture and a blank
 column-1 line permit one Enter. Unknown/active work, changed identity/width,
 typed input and other owners reject. Mac/older bridges reject without input.
-`connector_read_screen` accepts `context_only`, `tail_lines` and `max_bytes`;
+`connector_read_screen` accepts `full`, `context_only`, `tail_lines` and `max_bytes`;
 omitting returned text never weakens the full-frame token check. Successful
 tool replies include `structuredContent` as well as compatible text JSON.
+Omit those projection limits to read the entire captured native frame up to
+65536 UTF-8 bytes. Set `full=true` to return the entire already-captured native frame
+without that projection cap; it cannot be combined with `context_only=true`,
+`tail_lines` or `max_bytes`. The native protocol frame remains bounded to 262144
+bytes. This is a bounded SDK frame (Xshell samples at most 50 rows),
+not complete terminal scrollback. `screen_text_truncated` and omitted-byte counts
+describe response projection; use `full=true` for an unprojected new sample.
+Discarded scrollback cannot be recovered by requesting more bytes. Use retained
+command output and `connector_read` for pagination.
+Set `include_recovery_token=false` for ordinary inspection without a returned
+token. Reading itself never requires acknowledgement. The default remains true
+for existing recovery callers; tokens expire after 30 seconds. Successful command
+responses only suggest reading another page when `next_cursor` is present.
 
 ## OpenSSH command session
 

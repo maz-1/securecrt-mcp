@@ -73,6 +73,51 @@ async function run(binary) {
     assert.equal(listed.securecrt.length, 2);
     assert.deepEqual(listed.openssh, []);
     const discovered = listed.securecrt[0];
+    assert.equal(listed.xshell_error, undefined);
+    assert.equal(listed.xshell_enumeration, undefined);
+    const onlySecurecrt = await mcp.tool("connector_list", { backend: "securecrt" });
+    assert.equal(onlySecurecrt.securecrt.length, 2);
+    assert.equal(onlySecurecrt.xshell_error, undefined);
+    const onlyXshell = await mcp.tool("connector_list", { backend: "xshell" });
+    assert.equal(onlyXshell.securecrt.length, 0);
+    assert.equal(onlyXshell.xshell_enumeration, "unavailable");
+    assert(onlyXshell.xshell_error);
+    assert(names.connector_open.inputSchema.allOf);
+    assert(names.connector_exec.inputSchema.allOf);
+    const screen = await mcp.tool("connector_read_screen", {
+      session_id: discovered.session_id, include_recovery_token: false,
+    });
+    assert.match(screen.text, /test output/);
+    assert.equal(screen.screen_token, undefined);
+    bridge.screenText = "start\n" + "中".repeat(25000) + "\nuser$";
+    const boundedScreen = await mcp.tool("connector_read_screen", { session_id: discovered.session_id });
+    assert.equal(boundedScreen.screen_text_truncated, true);
+    assert(Buffer.byteLength(boundedScreen.text) <= 65536);
+    const fullScreen = await mcp.tool("connector_read_screen", { session_id: discovered.session_id, full: true });
+    assert.equal(fullScreen.screen_text_truncated, false);
+    assert.equal(fullScreen.screen_text_omitted_bytes, 0);
+    assert.equal(fullScreen.text, bridge.screenText);
+    const mixedScreen = await mcp.tool("connector_read_screen", {
+      session_id: discovered.session_id, full: true, max_bytes: 4096,
+    }, true);
+    assert.match(mixedScreen.error.message, /cannot be combined/);
+    bridge.screenText = null;
+    const observer = await mcp.tool("connector_open", {
+      backend: "securecrt", target: discovered.session_id, mode: "exec", attach_mode: "observe",
+    });
+    const observerDenied = await mcp.tool("connector_exec", {
+      session_id: observer.session_id, command: "q",
+    }, true);
+    assert.match(observerDenied.error.message, /observe/);
+    await mcp.tool("connector_close", { session_id: observer.session_id });
+    const custom = await mcp.tool("connector_open", {
+      backend: "securecrt", target: discovered.session_id, mode: "exec", expected_prompt: "user$",
+    });
+    await mcp.tool("connector_close", { session_id: custom.session_id });
+    const wrongBackend = await mcp.tool("connector_open", {
+      backend: "securecrt", target: "xshell/discovered/example", mode: "exec",
+    }, true);
+    assert.match(wrongBackend.error.message, /matching backend/);
     assert.equal(discovered.session_id, "securecrt/discovered/" + discovered.id);
     assert.equal(discovered.binding, "discovered");
     assert.equal(discovered.open_required_for_commands, true);
@@ -266,6 +311,20 @@ async function run(binary) {
     });
     assert.equal(prompt.state, "completed");
     assert.equal(prompt.exit_code, null);
+    assert.equal(prompt.execution_state, "completed_unverified");
+    assert.equal(prompt.action, undefined);
+    const promptSentBefore = bridge.sent.length;
+    const missingWait = await mcp.tool("connector_exec", {
+      session_id: sid, command: "printf forbidden", mode: "prompt", expected_prompt: "user$",
+    }, true);
+    assert(missingWait.error);
+    assert.equal(bridge.sent.length, promptSentBefore);
+    const stalePrompt = await exec("prompt-stale-command", {
+      mode: "prompt", expected_prompt: "user$", wait_for: "user$",
+    });
+    assert.equal(stalePrompt.state, "completed");
+    assert.match(stalePrompt.text, /real output/);
+    assert(stalePrompt.timing.poll_calls >= 2, "old screen prompt completed on echo");
     // Explicit snapshot still leaves completion unknown and requires recovery.
     {
       const snap = await exec("printf snapshot", {

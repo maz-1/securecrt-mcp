@@ -345,11 +345,13 @@ class FakeBridge {
       };
     if (name === "read_screen")
       return {
-        text: "test output\nuser$ ",
+        text: this.screenText || "test output\nuser$ ",
         current_line: this.currentLine || "user$",
         screen_token: "test-token",
       };
     if (name === "attach") {
+      if (p.expected_prompt && p.expected_prompt !== (this.currentLine || "user$"))
+        throw new Error("prompt_mismatch");
       const id = "fake-attachment-" + crypto.randomUUID();
       this.bindings.set(id, p.session);
       return {
@@ -394,6 +396,13 @@ class FakeBridge {
     if (name === "poll") {
       const v = this.active.get(p.capture_id);
       assert(v, "capture_mismatch");
+      if (v.text.includes("prompt-stale-command")) {
+        v.polls = (v.polls || 0) + 1;
+        return {
+          text: v.polls === 1 ? "prompt-stale-command\r\n" : "real output\r\nuser$",
+          current_line: "user$", overflow: false, expired: false, capture_may_be_incomplete: false,
+        };
+      }
       if (Date.now() < (this.graceUntil || 0))
         return {
           text: "",

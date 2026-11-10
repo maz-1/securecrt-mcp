@@ -241,7 +241,47 @@ check(
       assert.throws(() => ctx.mcpParse(text));
   },
 );
+check("SecureCRT: title redraw and two-minute idle preserve handles and attachments", () => {
+  const f = fixture("securecrt");
+  const first = f.call("list_sessions").result.sessions[0];
+  assert.equal(first.expires_in_ms, 900000);
+  const aid = f.call("attach", { session: first.id }).result.attachment_id;
+  f.tabs[0].Caption = "different cwd title";
+  now += 120001;
+  f.adapter.maintain();
+  assert.equal(f.call("read_screen", { session: first.id }).ok, true);
+  const again = f.call("list_sessions").result.sessions[0];
+  assert.equal(again.id, first.id);
+  assert.equal(again.caption, "different cwd title");
+  assert.equal(f.call("heartbeat", { attachment_id: aid }).result.expires_in_ms, 600000);
+  assert.deepEqual(f.state.sends, []);
+});
+check("SecureCRT: endpoint change still revokes a title-independent attachment", () => {
+  const f = fixture("securecrt"), sid = f.call("list_sessions").result.sessions[0].id;
+  const aid = f.call("attach", { session: sid }).result.attachment_id;
+  f.tabs[0].Session.Config.GetOption = () => "other endpoint";
+  now += 250;
+  f.adapter.maintain();
+  assert.equal(f.call("heartbeat", { attachment_id: aid }).ok, false);
+  assert.notEqual(f.call("list_sessions").result.sessions[0].id, sid);
+  assert.deepEqual(f.state.sends, []);
+});
 for (const backend of ["securecrt", "xshell"]) {
+  check(backend + ": pager permits observation only; custom idle prompt requires explicit binding", () => {
+    const f = fixture(backend), sid = f.call("list_sessions").result.sessions[0].id;
+    f.screens.A.line = "--More--";
+    const denied = f.call("attach", { session: sid });
+    assert.equal(denied.ok, false);
+    assert.match(denied.error, /input_context_required/);
+    const observed = f.call("attach", { session: sid, mode: "observe" });
+    assert.equal(observed.ok, true);
+    assert.equal(observed.result.expires_in_ms, 600000);
+    assert.equal(f.call("prepare_and_begin", { attachment_id: observed.result.attachment_id, capture_id: "observer", text: "q", runtime_ms: 10000 }).sent, false);
+    f.screens.A.line = "custom ➜";
+    assert.equal(f.call("attach", { session: sid }).ok, false);
+    assert.equal(f.call("attach", { session: sid, expected_prompt: "custom ➜" }).ok, true);
+    assert.deepEqual(f.state.sends, []);
+  });
   check(
     backend +
       ": observed disconnect permanently invalidates the old generation",

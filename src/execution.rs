@@ -70,26 +70,33 @@ struct Job {
 }
 impl Job {
     fn snapshot(&self) -> Value {
-        json!({"command_id": self.id, "operation_id": self.operation_id, "session": self.session, "state": self.state,
+        let mut value = json!({"command_id": self.id, "operation_id": self.operation_id, "session": self.session, "state": self.state,
             "sent": self.sent, "requires_idle_ack": self.requires_idle_ack,
             "error_code": if self.state == State::TimedOut { Some("capture_timeout") } else if matches!(self.state, State::Rejected | State::Unknown) { Some(crate::fault::code(&self.reason)) } else { None },
             "action": if self.state.active() { "Poll this command_id or explicitly interrupt; never resubmit." }
                 else if self.requires_idle_ack { crate::fault::action("busy_unresolved") }
                 else if self.state == State::Rejected { crate::fault::action(crate::fault::code(&self.reason)) }
-                else { "Read further output pages if next_cursor is present." },
+                else { "" },
             "automatic_retry": false,
             "exit_code": self.exit_code, "reason": self.reason, "truncated": self.truncated,
             "capture_may_be_incomplete": self.incomplete, "retained_bytes": self.output.len(),
             "begin_marker_observed": self.begin_marker_observed, "end_marker_observed": self.end_marker_observed,
             "capture_transport": self.capture_transport,
             "exit_code_source": if self.exit_code.is_some() { "posix_marker" } else { "unverified" },
-            "execution_state": if self.end_marker_observed { "completed" } else if self.sent == Some(false) { "not_sent" } else if self.state.active() { "awaiting_completion" } else { "unknown" },
+            "execution_state": if self.end_marker_observed { "completed" } else if self.sent == Some(false) { "not_sent" } else if self.state.active() { "awaiting_completion" } else if self.state == State::Completed { "completed_unverified" } else { "unknown" },
             "capture_state": if self.state.active() { "collecting" } else if self.sent == Some(false) { "not_started" } else if self.incomplete { "may_be_incomplete" } else { "complete" },
             "dropped_retention_bytes": self.output_bytes.saturating_sub(self.output.len()),
             "observed_output_bytes": self.output_bytes, "audit_warning": self.audit_warning,
             "remote_termination_confirmed": false, "stream": self.stream, "output_start": self.output_start,
             "timing": {"elapsed_us": self.finished.unwrap_or_else(Instant::now).duration_since(self.created).as_micros() as u64,
-                "first_output_us": self.first_output_us, "poll_calls": self.poll_calls, "audit_dispatch_us": self.audit_dispatch_us}})
+                "first_output_us": self.first_output_us, "poll_calls": self.poll_calls, "audit_dispatch_us": self.audit_dispatch_us}});
+        if value["action"] == "" {
+            value
+                .as_object_mut()
+                .expect("snapshot object")
+                .remove("action");
+        }
+        value
     }
     fn append(&mut self, text: &str, limit: usize) {
         if !text.is_empty() && self.first_output_us.is_none() {
@@ -434,7 +441,6 @@ impl Engine {
         let settle = Duration::from_millis(p.settle_ms.unwrap_or(750));
         let mut parser = MarkerParser::new(begin, end);
         let mut prompt_tail = String::new();
-        let mut prompt_progress = false;
         let mut log_reader: Option<native_log::Reader> = None;
         let (mut state, mut code, mut reason) = loop {
             if stop.load(Ordering::SeqCst) {
@@ -543,17 +549,13 @@ impl Engine {
                 );
             }
             if p.mode == CaptureMode::Prompt {
-                prompt_progress |= !chunk.is_empty();
                 prompt_tail.push_str(&chunk);
                 let wait_for = p.wait_for.as_deref().unwrap_or("");
                 // The old idle prompt may remain visible before native redraw.
-                // A screen-only match cannot complete a command until capture
-                // has observed post-send output progress.
-                let prompt_observed = literal_prompt_observed(&prompt_tail, wait_for)
-                    || (prompt_progress
-                        && response["current_line"].as_str().is_some_and(|line| {
-                            !wait_for.is_empty() && line.trim_end() == wait_for
-                        }));
+                // Command echo is progress too, so a screen-only match remains
+                // unsafe even after output arrives. Require the literal in the
+                // post-send capture stream instead of the old screen frame.
+                let prompt_observed = literal_prompt_observed(&prompt_tail, wait_for);
                 if let Some(index) = prompt_tail.rfind('\n') {
                     prompt_tail = prompt_tail[index + 1..].to_owned();
                 }

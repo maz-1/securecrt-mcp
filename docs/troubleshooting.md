@@ -12,6 +12,12 @@
 
 **stale_session / stale_attachment**：断开、重连、配置变化、原对象关闭或租约过期使句柄失效。重新枚举并检查目标，不能用旧索引、同名会话或其他进程替代。
 
+更新后的桥接会话租期为 900 秒，附件为 600 秒；list/open/heartbeat 返回 `expires_in_ms`。SecureCRT 标题随目录变化不再导致失效。`stale_attachment` 也可能表示 MCP/daemon 重启后丢失了本地绑定；标准恢复是 `connector_list` → 检查原目标 → `connector_open(target=<id 或对应后端 discovered session_id>, mode="exec")` → 使用新返回的附件 `session_id`。恢复绑定不代表可重放未知命令；长时间分析可用 `connector_heartbeat` 维护附件。
+
+**input_context_required**：自动绑定仅接受以 `#`、`$`、`%` 结尾且不含密码/分页器特征的提示符。先用 discovered `session_id` 调用 `connector_read_screen`，或用 `connector_open(..., mode="exec", attach_mode="observe")` 只读绑定。确认原目标确实处于空闲 shell 后，再用精确 `expected_prompt` 重新绑定 shared 附件。分页器、密码和 REPL 不是空闲 shell，不会自动发送退出按键。
+
+**mode / wait_for 参数错误**：`connector_open.mode` 是通道类型，SecureCRT/Xshell 只用 `exec`，OpenSSH 可用 `exec`/`pty`；`connector_exec.mode` 是捕获模式，桌面默认 `posix`。显式 `prompt` 模式必须有非空 `wait_for`；`expected_prompt` 不能替代它。`completed_unverified` 表示已观察到指定完成文本，但没有验证命令退出码。
+
 **stale_screen / unstable_screen / prompt_mismatch / context_changed**：文本、行列位置、尺寸或输入边界变化。先检查原Tab，只读获取新屏幕；不能自动重发原命令或把半条输入/密码框当成空闲。Mac稳定快照与提示符排空修复不取消这些拒绝边界。
 
 **busy / unresolved / capture_timeout**：原任务仍活跃或结果不确定。停止新输入，检查command_id和原终端；只对本次明确跟踪的命令显式中断。原命令结束、空闲确认后以新鲜令牌显式ack，保留历史超时/取消结果。没有自动重放或自动Ctrl+C。

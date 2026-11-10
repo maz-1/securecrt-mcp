@@ -59,7 +59,8 @@ impl SecureCrtServer {
             "attachment_lease_renewed": false,
             "open_required_for_commands": true,
             "unresolved": session["unresolved"],
-            "lease_expires_ms": session["lease_expires_ms"]
+            "lease_expires_ms": session["lease_expires_ms"],
+            "expires_in_ms": session["expires_in_ms"]
         }))
     }
 }
@@ -82,7 +83,9 @@ fn project_screen(mut value: Value, p: &crate::connector::ConnectorScreenParams)
             .nth(lines - 1)
             .map_or(0, |(i, _)| i + 1);
     }
-    start = start.max(text.len().saturating_sub(p.max_bytes.unwrap_or(65536)));
+    if p.full != Some(true) {
+        start = start.max(text.len().saturating_sub(p.max_bytes.unwrap_or(65536)));
+    }
     while !text.is_char_boundary(start) {
         start += 1;
     }
@@ -92,7 +95,29 @@ fn project_screen(mut value: Value, p: &crate::connector::ConnectorScreenParams)
     value["screen_text_total_bytes"] = json!(original_bytes);
     value["screen_text_truncated"] = json!(start > 0);
     value["screen_token_scope"] = json!("full_native_frame");
+    if p.include_recovery_token == Some(false) {
+        if let Some(fields) = value.as_object_mut() {
+            for key in ["screen_token", "token_expires_ms", "screen_token_scope"] {
+                fields.remove(key);
+            }
+        }
+    }
     value
+}
+
+// Normalize only discovery wrappers; never infer a replacement terminal or reuse an attachment as a target.
+fn native_target(target: &str, backend: &str) -> anyhow::Result<String> {
+    let prefix = format!("{backend}/discovered/");
+    let target = target.strip_prefix(&prefix).unwrap_or(target);
+    anyhow::ensure!(!target.is_empty(), "missing discovered session identity");
+    anyhow::ensure!(
+        !target.starts_with("securecrt/")
+            && !target.starts_with("xshell/")
+            && !target.starts_with("openssh/")
+            && !target.contains("/attachment/"),
+        "invalid desktop target: use id or the matching backend's discovered session_id from connector_list; attachment session_id belongs to connector_exec"
+    );
+    Ok(target.to_owned())
 }
 
 fn native_terminal_capabilities(native: &Value) -> Value {
@@ -126,27 +151,38 @@ fn namespace_batch(mut value: Value, backend: &str) -> anyhow::Result<Value> {
 #[tool_router]
 impl SecureCrtServer {
     #[tool(
-        description = "List currently available sessions from every configured connector backend. IDs are opaque and backend-bound; capabilities describe which operations are valid for each session.",
+        description = "List available connector sessions, optionally filtered by backend. Unavailable Xshell diagnostics appear only with backend=xshell. IDs are opaque and backend-bound; use id or discovered session_id as connector_open.target. Only connector_open returns the attachment session_id used by connector_exec.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
-    async fn connector_list(&self) -> Result<rmcp::model::CallToolResult, McpError> {
-        let securecrt = match timeout(
-            Duration::from_millis(250),
-            self.engine.bridge.call("list_sessions", json!({})),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(anyhow::anyhow!("SecureCRT session probe timed out")),
+    async fn connector_list(
+        &self,
+        Parameters(p): Parameters<crate::connector::ConnectorListParams>,
+    ) -> Result<rmcp::model::CallToolResult, McpError> {
+        use crate::connector::ConnectorBackend;
+        let securecrt = if p.backend.is_none() || p.backend == Some(ConnectorBackend::Securecrt) {
+            match timeout(
+                Duration::from_millis(250),
+                self.engine.bridge.call("list_sessions", json!({})),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!("SecureCRT session probe timed out")),
+            }
+        } else {
+            Ok(json!({"sessions": []}))
         };
-        let openssh = self.engine.connectors.list().await;
+        let openssh = if p.backend.is_none() || p.backend == Some(ConnectorBackend::Openssh) {
+            self.engine.connectors.list().await
+        } else {
+            Ok(json!({"sessions": []}))
+        };
         result(
             async {
                 let openssh = openssh?;
                 let mut response = json!({
                     "securecrt": [],
                     "xshell": [],
-                    "xshell_enumeration": "unavailable",
                     "openssh": openssh["sessions"].clone(),
                 });
                 match securecrt {
@@ -175,6 +211,7 @@ impl SecureCrtServer {
                     }
                     Err(error) => response["securecrt_error"] = json!(error.to_string()),
                 }
+                if p.backend.is_none() || p.backend == Some(ConnectorBackend::Xshell) {
                 if let Some(xshell) = &self.xshell {
                     match timeout(
                         // Xshell fans out to every live process. The calls are
@@ -208,11 +245,16 @@ impl SecureCrtServer {
                                 }
                             }
                         }
-                        Ok(Err(error)) => response["xshell_error"] = json!(error.to_string()),
-                        Err(_) => response["xshell_error"] = json!("Xshell session probe timed out"),
+                        Ok(Err(error)) if p.backend == Some(ConnectorBackend::Xshell) => response["xshell_error"] = json!(error.to_string()),
+                        Err(_) if p.backend == Some(ConnectorBackend::Xshell) => response["xshell_error"] = json!("Xshell session probe timed out"),
+                        _ => {},
                     }
-                } else {
+                } else if p.backend == Some(ConnectorBackend::Xshell) {
                     response["xshell_error"] = json!("Xshell bridge is not configured; run init and start securecrt-mcp-xshell.js inside Xshell");
+                }
+                if p.backend == Some(ConnectorBackend::Xshell) && response.get("xshell_enumeration").is_none() {
+                    response["xshell_enumeration"] = json!("unavailable");
+                }
                 }
                 Ok(response)
             }
@@ -221,13 +263,29 @@ impl SecureCrtServer {
     }
 
     #[tool(
-        description = "Open an explicit persistent OpenSSH command or PTY session, or bind an existing SecureCRT command session. Uses the user's ssh_config, Agent and known_hosts for OpenSSH; never stores credentials.",
+        description = "Open a connector channel. Desktop SecureCRT/Xshell require mode=exec (not posix); target accepts id or discovered session_id from connector_list. attach_mode=observe binds read-only even in a pager or nonstandard prompt; it cannot execute commands. For writing, inspect an idle shell then reopen shared/exclusive with expected_prompt if nonstandard. OpenSSH supports mode=exec/pty and uses ssh_config, Agent and known_hosts. Capture mode posix/prompt/snapshot belongs only to connector_exec.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn connector_open(
         &self,
         Parameters(p): Parameters<crate::connector::ConnectorOpenParams>,
     ) -> Result<rmcp::model::CallToolResult, McpError> {
+        let desktop_target = match p.backend {
+            crate::connector::ConnectorBackend::Securecrt => native_target(&p.target, "securecrt"),
+            crate::connector::ConnectorBackend::Xshell => native_target(&p.target, "xshell"),
+            crate::connector::ConnectorBackend::Openssh => {
+                if p.attach_mode.is_some() || p.expected_prompt.is_some() {
+                    return result(Err(anyhow::anyhow!(
+                        "attach_mode and expected_prompt apply only to desktop backends"
+                    )));
+                }
+                Ok(p.target.clone())
+            }
+        };
+        let target = match desktop_target {
+            Ok(target) => target,
+            Err(error) => return result(Err(error)),
+        };
         if p.backend == crate::connector::ConnectorBackend::Xshell {
             let Some(xshell) = &self.xshell else {
                 return result(Err(anyhow::anyhow!(
@@ -241,9 +299,13 @@ impl SecureCrtServer {
             }
             let value = xshell
                 .attach(crate::terminal::AttachParams {
-                    session: p.target,
-                    mode: "shared".into(),
-                    expected_prompt: None,
+                    session: target,
+                    mode: p
+                        .attach_mode
+                        .unwrap_or(crate::connector::AttachmentMode::Shared)
+                        .as_str()
+                        .into(),
+                    expected_prompt: p.expected_prompt,
                 })
                 .await
                 .map(|mut value| {
@@ -275,9 +337,13 @@ impl SecureCrtServer {
             let value = self
                 .engine
                 .attach(crate::terminal::AttachParams {
-                    session: p.target,
-                    mode: "shared".into(),
-                    expected_prompt: None,
+                    session: target,
+                    mode: p
+                        .attach_mode
+                        .unwrap_or(crate::connector::AttachmentMode::Shared)
+                        .as_str()
+                        .into(),
+                    expected_prompt: p.expected_prompt,
                 })
                 .await
                 .map(|mut value| {
@@ -461,7 +527,7 @@ impl SecureCrtServer {
     }
 
     #[tool(
-        description = "Read the current screen context for a screen-backed connector session. Returns a single-use token valid for 30 seconds for an explicit acknowledgement. Any screen text or cursor change invalidates it, even if the prompt still matches. Ordinary connector_exec uses its attachment rather than this token.",
+        description = "Read the captured native screen frame using a discovered session_id or attachment session_id (SecureCRT also accepts its native id). Defaults to 65536 UTF-8 bytes. full=true returns the entire bounded native frame without projection, not full scrollback; cannot combine with context_only=true/tail_lines/max_bytes. Omitted bytes are explicit. include_recovery_token=false omits the optional 30-second acknowledgement token; reading never requires acknowledgement. Ordinary exec uses its attachment.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn connector_read_screen(
@@ -473,7 +539,31 @@ impl SecureCrtServer {
         {
             return result(Err(anyhow::anyhow!("invalid screen tail_lines/max_bytes")));
         }
+        if p.full == Some(true)
+            && (p.context_only == Some(true) || p.tail_lines.is_some() || p.max_bytes.is_some())
+        {
+            return result(Err(anyhow::anyhow!(
+                "full screen frame cannot be combined with context_only=true, tail_lines or max_bytes"
+            )));
+        }
         let project = |value| project_screen(value, &p);
+        for (backend, engine) in [
+            ("securecrt", Some(&self.engine)),
+            ("xshell", self.xshell.as_ref()),
+        ] {
+            if let Some(id) = p.session_id.strip_prefix(&format!("{backend}/discovered/")) {
+                let Some(engine) = engine else {
+                    return result(Err(anyhow::anyhow!("Xshell bridge is unavailable")));
+                };
+                return result(
+                    engine
+                        .bridge
+                        .call("read_screen", json!({"session": id}))
+                        .await
+                        .map(project),
+                );
+            }
+        }
         if let Some(attachment) = p.session_id.strip_prefix("xshell/") {
             let Some(xshell) = &self.xshell else {
                 return result(Err(anyhow::anyhow!("Xshell bridge is unavailable")));

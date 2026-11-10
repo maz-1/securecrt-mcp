@@ -172,6 +172,11 @@ impl Engine {
                     Value::Null
                 };
                 result["wait_budget_exhausted"] = json!(job.state.active());
+                if !result["next_cursor"].is_null() && result.get("action").is_none() {
+                    result["action"] = json!(
+                        "Read the next output page with connector_read using this command_id and next_cursor."
+                    );
+                }
                 return Ok(result);
             }
             drop(registry);

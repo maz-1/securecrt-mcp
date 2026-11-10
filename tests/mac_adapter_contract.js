@@ -113,6 +113,19 @@ const nativeContract =
                     expected_prompt='user$', text='printf hello', capture_id='op-1',
                     runtime_ms=10000)
 
+    def test_title_change_and_idle_keep_session_with_transparent_leases(self):
+        self.crt.tabs[0].Caption = 'new cwd title'
+        self.time += 120001
+        self.adapter.maintain()
+        listing = self.adapter.list_sessions()['sessions'][0]
+        self.assertEqual(listing['id'], self.sid)
+        self.assertEqual(listing['caption'], 'new cwd title')
+        self.assertEqual(listing['expires_in_ms'], 900000)
+        attached = self.adapter.attach(self.sid, mode='observe')
+        self.assertEqual(attached['expires_in_ms'], 600000)
+        self.assertEqual(self.adapter.heartbeat(attached['attachment_id'])['expires_in_ms'], 600000)
+        self.assertFalse(self.crt.tabs[0].Screen.sent)
+
     def test_handles_survive_reorder_without_retargeting(self):
         old = self.crt.tabs[0]
         self.crt.tabs.reverse()

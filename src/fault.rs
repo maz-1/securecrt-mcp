@@ -68,10 +68,10 @@ pub fn action(error_code: &str) -> &'static str {
             "Read the screen again; inspect changes before a new intended request. No automatic retry occurred."
         }
         "stale_session" => {
-            "List sessions again and explicitly select the intended target; never substitute a tab index."
+            "Call connector_list, inspect the intended target, then connector_open(target=<id from that list>) and use the new attachment session_id. Never substitute a tab index or replay uncertain commands."
         }
         "stale_attachment" => {
-            "Open a fresh attachment to the verified target. Old results remain unknown; never replay them."
+            "Call connector_list, inspect the intended target, then connector_open(target=<id or discovered session_id>) in this MCP/daemon. Use its new session_id. Attachment TTL is 600s; connector_heartbeat renews it. Old results remain unknown; never replay them."
         }
         "ownership_conflict" => {
             "Inspect the owning client; do not take over its attachment or capture."
@@ -83,7 +83,7 @@ pub fn action(error_code: &str) -> &'static str {
             "Inspect the original terminal and wait for the original idle prompt. A new intended request may revalidate the same attachment after redraw; changed prompts require explicit inspection/re-attachment. Never automatically replay or acknowledge unresolved work."
         }
         "input_context_required" => {
-            "Inspect the original terminal. Confirm an idle shell and target, then supply expected_prompt for a nonstandard prompt. Do not type into password prompts or REPLs."
+            "Use connector_read_screen with the discovered session_id, or connector_open(mode=exec, attach_mode=observe) for read-only inspection. Only after confirming an idle shell and target, reopen shared with expected_prompt for a nonstandard prompt. Pagers/passwords/REPLs are not idle shells; never automatically send q, Enter or Ctrl+C."
         }
         "busy_unresolved" => {
             "Inspect bridge_status and the current command. If running, wait or explicitly interrupt. Only after confirming idle may the operator acknowledge_idle. Never auto-acknowledge."

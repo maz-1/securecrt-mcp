@@ -1,6 +1,7 @@
 // Windows Active Scripting bridge. ES3 only; native APIs stay on the host thread.
 // This module is also exercised with deterministic native API fixtures.
 var MCP_WINDOWS_VERSION = "0.5.7";
+var MCP_SESSION_LEASE_MS = 900000;
 function mcpFail(message) { throw String(message); }
 function mcpError(e) { return String(e.description || e.message || e) + (e.number ? " ("+e.number+")" : ""); }
 function mcpNow() { return new Date().getTime(); }
@@ -206,11 +207,11 @@ McpWindowsAdapter.prototype.session=function(id,retained) {
         if(!this.host.Session.Connected || mcpJson(this.metadata())!=mcpJson(e.metadata)) { e.invalid=true;mcpFail("stale_session: endpoint changed"); }
     } else {
         try {
-            if(!e.tab.Session.Connected || Number(e.tab.Index)!=e.index || String(e.tab.Caption)!=e.caption || mcpJson(this.metadata(e.tab))!=mcpJson(e.metadata)) e.invalid=true;
+            if(!e.tab.Session.Connected || Number(e.tab.Index)!=e.index || mcpJson(this.metadata(e.tab))!=mcpJson(e.metadata)) e.invalid=true;
         } catch(error) { e.invalid=true; }
         if(e.invalid) mcpFail("stale_session: endpoint changed");
     }
-    e.expires=mcpNow()+120000;return e;
+    e.expires=mcpNow()+MCP_SESSION_LEASE_MS;return e;
 };
 McpWindowsAdapter.prototype.capabilities=function() { var c=["session_leases","screen_tokens","attachments","prepare_and_begin","per_session_capture","interrupt","ack_fresh_view","poll_bulk","file_ipc","restore_prompt","graceful_stop"];if(this.captureFiles)c.push("native_log_capture");return c; };
 McpWindowsAdapter.prototype.ping=function() {
@@ -247,16 +248,16 @@ McpWindowsAdapter.prototype.list=function() {
         if(self.backend=="securecrt") { for(key in self.sessions) if(mcpOwn(self.sessions,key)) {
             var old=self.sessions[key];
             try {
-                if(!old.invalid && old.index==index && old.tab.Session.Connected && Number(old.tab.Index)==index && String(old.tab.Caption)==old.caption && mcpJson(self.metadata(old.tab))==mcpJson(old.metadata)) { id=key;break; }
+                if(!old.invalid && old.index==index && old.tab.Session.Connected && Number(old.tab.Index)==index && mcpJson(metadata)==mcpJson(old.metadata) && mcpJson(self.metadata(old.tab))==mcpJson(old.metadata)) { id=key;break; }
             } catch(error) {}
         } }
         else { for(key in self.sessions) if(mcpOwn(self.sessions,key) && !self.sessions[key].invalid && mcpJson(self.sessions[key].metadata)==mcpJson(metadata)) { id=key;break; } }
         if(!id) id=self.unique("session");
         if(!mcpOwn(self.sessions,id) && mcpCount(self.sessions)>=128) mcpFail("session_limit");
-        var e={metadata:metadata,expires:mcpNow()+120000,tab:tab,index:index,caption:tab?String(tab.Caption):null};
-        if(self.backend=="securecrt" && self.sessions[id]) { e=self.sessions[id];e.expires=mcpNow()+120000; }
+        var e={metadata:metadata,expires:mcpNow()+MCP_SESSION_LEASE_MS,tab:tab,index:index,caption:tab?String(tab.Caption):null};
+        if(self.backend=="securecrt" && self.sessions[id]) { e=self.sessions[id];e.expires=mcpNow()+MCP_SESSION_LEASE_MS;e.caption=String(tab.Caption); }
         self.sessions[id]=e;
-        var value={id:id,session_id:id,connected:true,lease_expires_ms:e.expires,capabilities:self.capabilities()};
+        var value={id:id,session_id:id,connected:true,lease_expires_ms:e.expires,expires_in_ms:Math.max(0,e.expires-mcpNow()),capabilities:self.capabilities()};
         for(var key in metadata) if(mcpOwn(metadata,key)) value[key]=metadata[key];
         if(tab) { value.caption=e.caption;value.index=index;value.unresolved=self.unresolved[id] || null; }
         out.push(value);
@@ -306,7 +307,7 @@ McpWindowsAdapter.prototype.readScreen=function(id) {
     return value;
 };
 McpWindowsAdapter.prototype.attachment=function(id,write) {
-    var a=this.attachments[id];if(!a || mcpNow()>a.expires) mcpFail("stale_attachment");
+    var a=this.attachments[id];if(!a || mcpNow()>a.expires) mcpFail("stale_attachment: attachment expired (TTL 600s) or is not owned by this daemon; call connector_list, inspect the intended target, then connector_open(target=<id>) and use its new session_id; never replay uncertain commands");
     if(a.owner!=this.owner) mcpFail("ownership_conflict");if(write && a.mode=="observe") mcpFail("observe attachment does not permit writes");
     this.session(a.session,true);a.expires=mcpNow()+600000;return a;
 };
@@ -328,10 +329,10 @@ McpWindowsAdapter.prototype.attach=function(p) {
         if(existing.session==p.session && existing.owner!=this.owner && mcpNow()<existing.expires) mcpFail("ownership_conflict");
     }
     if(p.expected_prompt!=null && input.current_line!=mcpTrim(p.expected_prompt)) mcpFail("prompt_mismatch");
-    if(mode!="observe" && p.expected_prompt==null && (!/[#$%]$/.test(input.current_line) || /password|passphrase|--more--/i.test(input.current_line))) mcpFail("input_context_required");
+    if(mode!="observe" && p.expected_prompt==null && (!/[#$%]$/.test(input.current_line) || /password|passphrase|--more--/i.test(input.current_line))) mcpFail("input_context_required: automatic binding requires an idle prompt ending in #, $ or % and excludes password/pager contexts; inspect with connector_read_screen or connector_open(attach_mode=observe); only after confirming an idle shell, reopen with explicit expected_prompt");
     var id=this.unique("attachment");
     this.attachments[id]={session:p.session,entry:e,context:input,mode:mode,owner:this.owner,expires:mcpNow()+600000,awaiting:false,marker:null};
-    return {attachment_id:id,session:p.session,current_line:input.current_line,mode:mode,attachment_expires_ms:this.attachments[id].expires,session_lease_expires_ms:e.expires,configured_endpoint:e.metadata,unresolved:this.unresolved[p.session] || null};
+    return {attachment_id:id,session:p.session,current_line:input.current_line,mode:mode,attachment_expires_ms:this.attachments[id].expires,expires_in_ms:Math.max(0,this.attachments[id].expires-mcpNow()),session_lease_expires_ms:e.expires,configured_endpoint:e.metadata,unresolved:this.unresolved[p.session] || null};
 };
 McpWindowsAdapter.prototype.ownership=function(sid) {
     for(var id in this.attachments) if(mcpOwn(this.attachments,id)) {
@@ -730,7 +731,7 @@ McpWindowsAdapter.prototype.maintain=function() {
             var entry=this.sessions[k];
             try {
                 if(this.backend=="securecrt") {
-                    if(!entry.tab.Session.Connected || Number(entry.tab.Index)!=entry.index || String(entry.tab.Caption)!=entry.caption) entry.invalid=true;
+                    if(!entry.tab.Session.Connected || Number(entry.tab.Index)!=entry.index) entry.invalid=true;
                 } else if(String(this.host.Session.SessionName)==entry.metadata.session_name && !this.host.Session.Connected) entry.invalid=true;
             } catch(disconnected) { entry.invalid=true; }
         }
@@ -760,7 +761,7 @@ McpWindowsAdapter.prototype.dispatch=function(method,p) {
     if(method=="read_screen") return this.readScreen(p.session);
     if(method=="attach") return this.attach(p);
     if(method=="detach") { this.attachment(p.attachment_id,false);delete this.attachments[p.attachment_id];return {detached:true,sent:false,remote_termination_confirmed:false}; }
-    if(method=="heartbeat") { a=this.attachment(p.attachment_id,false);return {attachment_id:p.attachment_id,session:a.session,attachment_expires_ms:a.expires,session_lease_expires_ms:this.sessions[a.session].expires,unresolved:this.unresolved[a.session] || null}; }
+    if(method=="heartbeat") { a=this.attachment(p.attachment_id,false);return {attachment_id:p.attachment_id,session:a.session,attachment_expires_ms:a.expires,expires_in_ms:Math.max(0,a.expires-mcpNow()),session_lease_expires_ms:this.sessions[a.session].expires,unresolved:this.unresolved[a.session] || null}; }
     if(method=="prepare_and_begin") return this.begin(p);
     if(method=="begin") return this.beginScreen(p);
     if(method=="poll" || method=="poll_bulk") return this.poll(p);

@@ -76,7 +76,11 @@ SecureCRT/Xshell 的 `connector_exec` 省略 `mode` 时默认使用 `posix`：�
 
 上述参数用于 `connector_restore_prompt`，仅在空白输入行、光标列 1、原宽度未变时发送一次 Enter。密码、分页器、输入中的命令、resize、其他 owner、失效 token、未知前台状态均拒绝。恢复失败会保留互锁，不能再次发送恢复按键；恢复不终止后台任务。已有正常提示符不发送按键。Mac/旧桥接不支持时在发送前拒绝。
 
-当前 Windows 枚举 lease 为 120 秒、screen token 为 30 秒、attachment 为 600 秒；这些是当前实现值。有效 owner attachment 的操作和 capture poll 会重新核实真实对象并续期，heartbeat 不会延长 screen token。重连、端点/标题/索引变化仍拒绝；附件失效需要重新枚举和绑定。
+更新后的原生桥接枚举 lease 为 900 秒、screen token 为 30 秒、attachment 为 600 秒。list/open/heartbeat 用 `expires_in_ms` 返回各自租约的剩余时间。有效 owner 的 heartbeat 和执行 poll 会核实原对象并延长附件租期；读屏只延长原生会话租期，heartbeat 不延长 screen token。SecureCRT 标题更新保留句柄；已观察到断开、端点变化或桥接重启仍使旧句柄失效（Windows 也拒绝索引变化）。失效后按 list → 检查目标 → open → 使用新附件 session_id 恢复，不重放不确定命令。正常连续调用无需每次枚举；长时间分析时应在附件过期前 heartbeat。
+
+`connector_open.target` 同时接受列表的 `id` 和对应后端的 discovered `session_id`。尚未确认空闲时，可用 `mode="exec", attach_mode="observe"` 建立只读附件并读屏；观察附件不能执行。确认空闲 shell 后关闭观察附件，再以 shared 重新绑定；非标准提示符用精确 `expected_prompt`。不要自动向分页器发送 `q`；诊断命令优先使用其支持的 `--no-pager` 选项。`connector_list` 可用 `backend` 过滤；只有明确查询 `backend="xshell"` 才返回 Xshell 不可用诊断。
+
+普通检查可设置 `include_recovery_token=false` 省略 token，读屏本身不要求确认。不设置 `context_only`、`tail_lines`、`max_bytes` 时返回最多 65536 个 UTF-8 字节的原生采样帧；`full=true` 可取消响应投影，仍受原生协议帧上限约束，不能与上述投影限制混用。这不代表全部滚动历史；更长结果应读取保留命令输出的分页。`prompt` 捕获必须提供非空 `wait_for`；`expected_prompt` 只校验发送前输入边界。捕获流出现指定文本时返回 `execution_state="completed_unverified"`，没有退出码；屏幕残留旧提示符不能触发完成。已确认的 POSIX shell 优先使用内置完成标记取得退出码。
 
 ## 捕获、脚本和后台工作
 

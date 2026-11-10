@@ -55,16 +55,55 @@ pub enum ConnectorMode {
     Pty,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentMode {
+    Shared,
+    Exclusive,
+    Observe,
+}
+impl AttachmentMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Exclusive => "exclusive",
+            Self::Observe => "observe",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorListParams {
+    /// Query only this backend. Omit to discover all; unavailable Xshell diagnostics are opt-in.
+    pub backend: Option<ConnectorBackend>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = desktop_channel_schema)]
 pub struct ConnectorOpenParams {
     pub backend: ConnectorBackend,
-    /// OpenSSH Host alias or destination. Never a tab index.
+    /// Desktop: id or discovered session_id from connector_list; never an attachment or tab index.
+    /// OpenSSH: Host alias or destination.
     pub target: String,
     pub config_path: Option<String>,
+    /// Channel type: exec for SecureCRT/Xshell; exec or pty for OpenSSH.
+    /// Capture mode posix/prompt/snapshot belongs to connector_exec, never connector_open.
     pub mode: ConnectorMode,
+    /// Desktop ownership: shared (default), exclusive, or observe (read-only, no idle prompt required).
+    pub attach_mode: Option<AttachmentMode>,
+    /// Desktop: exact nonstandard idle prompt, only after inspection. Never use to guess pager/password readiness.
+    pub expected_prompt: Option<String>,
     pub rows: Option<u16>,
     pub cols: Option<u16>,
+}
+
+fn desktop_channel_schema(schema: &mut schemars::Schema) {
+    schema.insert("allOf".into(), json!([{
+        "if": {"properties": {"backend": {"enum": ["securecrt", "xshell"]}}, "required": ["backend"]},
+        "then": {"properties": {"mode": {"const": "exec"}}}
+    }]));
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -102,12 +141,17 @@ pub struct ConnectorInterruptParams {
 #[serde(deny_unknown_fields)]
 pub struct ConnectorScreenParams {
     pub session_id: String,
+    /// Return the entire bounded native frame without response projection; not full scrollback.
+    /// Cannot be combined with context_only=true, tail_lines or max_bytes.
+    pub full: Option<bool>,
     /// Return only context and a fresh recovery token, omitting screen history.
     pub context_only: Option<bool>,
     /// Limit returned screen text to this many trailing lines (1..200).
     pub tail_lines: Option<usize>,
     /// UTF-8 byte limit for returned screen text (4..65536).
     pub max_bytes: Option<usize>,
+    /// Omit the recovery token from this read-only response when false (default true).
+    pub include_recovery_token: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -127,6 +171,7 @@ pub struct ConnectorHeartbeatParams {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = prompt_completion_schema)]
 pub struct ConnectorExecParams {
     pub session_id: String,
     pub command: String,
@@ -136,6 +181,7 @@ pub struct ConnectorExecParams {
     /// OpenSSH exec always uses its marker mode.
     pub mode: Option<CaptureMode>,
     pub expected_prompt: Option<String>,
+    /// Required nonempty literal completion text for mode=prompt. expected_prompt only validates input readiness.
     pub wait_for: Option<String>,
     pub operation_id: Option<String>,
     pub timeout_ms: Option<u64>,
@@ -144,6 +190,13 @@ pub struct ConnectorExecParams {
     /// Opt-in Windows SecureCRT/Xshell POSIX acceleration. A private temporary log
     /// contains command echo and output; existing session logging is preserved.
     pub prefer_native_log: Option<bool>,
+}
+
+fn prompt_completion_schema(schema: &mut schemars::Schema) {
+    schema.insert("allOf".into(), json!([{
+        "if": {"properties": {"mode": {"const": "prompt"}}, "required": ["mode"]},
+        "then": {"required": ["wait_for"], "properties": {"wait_for": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "[^\\s]"}}}
+    }]));
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

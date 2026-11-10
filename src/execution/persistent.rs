@@ -20,7 +20,7 @@ impl Engine {
             .get(id)
             .or_else(|| terminal.attachments.get(key))
             .cloned()
-            .context("stale_attachment: attach using this persistent MCP/daemon instance")
+            .context("stale_attachment: attachment is absent from this MCP/daemon (possibly restarted); call connector_list, inspect the target, then connector_open(target=<id>) and use its new session_id; never replay uncertain commands")
     }
 
     pub async fn attach(&self, p: AttachParams) -> Result<Value> {
@@ -137,10 +137,7 @@ impl Engine {
         }))
     }
     pub async fn exec(&self, p: ExecParams) -> Result<Value> {
-        let a = self
-            .attachment_value(&p.attachment_id)
-            .await
-            .context("stale_attachment: attach using this persistent MCP/daemon instance")?;
+        let a = self.attachment_value(&p.attachment_id).await?;
         ensure!(
             a["mode"] != "observe",
             "observe attachment does not permit commands"

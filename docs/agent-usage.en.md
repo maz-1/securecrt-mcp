@@ -16,6 +16,8 @@ Example `connector_open` (replace the target with the current list's opaque ID):
 
 Mac execution binding selects the verified native tab and samples stable context without sending a probe command. Observation attachments do not focus or input. Retain the returned `session_id` for all later calls; do not substitute tab numbers or same-name targets.
 
+`target` accepts either `id` or the matching backend's discovered `session_id` from the list. If idle state is unknown, use `connector_open` with `mode="exec", attach_mode="observe"`, then read its screen; observation cannot execute. After confirming an idle shell, close the observer and open a shared attachment, supplying exact `expected_prompt` for a nonstandard prompt. Never automatically send `q` into a pager. Prefer commands' supported `--no-pager` options for intended diagnostics. `connector_list` accepts an optional `backend` filter; unavailable Xshell diagnostics appear only with `backend="xshell"`.
+
 After binding, use `connector_read_screen` with the returned `session_id` to inspect the current screen. Only after explicit authorization and verification of an idle **POSIX shell**, use `connector_exec`:
 
 ```json
@@ -68,7 +70,9 @@ Then call `connector_restore_prompt` with `session_id`, `confirmed_idle=true`, t
 {"session_id":"returned-session-id","confirmed_idle":true,"screen_token":"fresh-token","expected_prompt":"original exact prompt"}
 ```
 
-Current Windows enumeration leases last 120 seconds, screen tokens 30 seconds and attachments 600 seconds. Valid owner attachments and active polls revalidate the actual retained object and renew its lease; heartbeat never renews screen tokens. Reconnection or changed endpoint/title/index still rejects. Expired attachments require discovery and binding again.
+Updated native enumeration leases last 900 seconds, screen tokens 30 seconds and attachments 600 seconds. List/open/heartbeat return `expires_in_ms` for their respective lease. Valid owner heartbeats and execution polls revalidate the retained object and renew the attachment lease; screen reads renew only the native session lease, and heartbeat never renews screen tokens. SecureCRT title updates preserve identity; observed disconnection, changed endpoint or bridge restart still invalidates handles (Windows also rejects index changes). On stale handles, list → inspect the intended target → open → use the new attachment session_id; never replay an uncertain command. There is no need to enumerate before every successful command. During long analysis, heartbeat the attachment before its lease expires.
+
+For ordinary inspection, `include_recovery_token=false` omits the token; reading never requires acknowledgement. Without `context_only`, `tail_lines` or `max_bytes`, the response includes the captured native frame up to 65536 UTF-8 bytes. Set `full=true` to remove response projection, within the existing native protocol frame bound; do not combine it with projection limits. This is not full scrollback. Use retained command output pagination for longer results. `prompt` capture requires a nonempty `wait_for`; `expected_prompt` only validates the pre-send boundary. A literal observed in the capture stream returns `execution_state="completed_unverified"` with no exit code; an unchanged old screen prompt cannot complete it. Prefer the built-in POSIX markers for verified exit status.
 
 ## Capture, scripts and background work
 
